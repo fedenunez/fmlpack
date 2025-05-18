@@ -57,7 +57,7 @@ The Filesystem Markup Language (FML) is a simple format to represent a file syst
 
     <|||file_start=projects/plan.txt|||>
     Project plan details go here.
-    <|||file_end|||>
+    <|||file_end|||>`
     ```
 
 This example creates a directory `projects` and a file `plan.txt` within it, containing the specified text.
@@ -159,8 +159,8 @@ def generate_fml(root_dir, files_and_folders, exclude_patterns, include_spec):
 
     sorted_items = sorted(files_and_folders) # Process in a consistent order
 
-    for item_path_orig in sorted_items:
-        item_path_abs = os.path.abspath(item_path_orig) # Should already be absolute
+    for item_path_orig in sorted_items: # item_path_orig is an absolute path from expand_and_collect_paths
+        item_path_abs = os.path.abspath(item_path_orig) 
         relative_path = get_relative_path(root_dir_abs, item_path_abs)
 
         # Create parent directory entries if not already processed
@@ -199,7 +199,8 @@ def generate_fml(root_dir, files_and_folders, exclude_patterns, include_spec):
                     errors.append(f"Could not process file {relative_path}: {e}")
                 fml_content.append("<|||file_end|||>\n")
         elif not os.path.exists(item_path_abs):
-             errors.append(f"Input item not found: {item_path_orig} (resolved to {item_path_abs})")
+             offending_item_display_path = get_relative_path(root_dir_abs, item_path_abs)
+             errors.append(f"Input item not found: {offending_item_display_path} (resolved to {item_path_abs})")
 
 
     return fml_content, errors
@@ -441,6 +442,15 @@ def main():
     if not archive_file_path and (args.extract or args.list) and not sys.stdin.isatty():
         archive_file_path = '-'
 
+    # Final check for determined operation mode
+    if not is_create_mode and not args.extract and not args.list:
+        # This condition implies no operation could be determined explicitly or by inference.
+        # Typically occurs if fmlpack is called with no flags and non-TTY stdin (e.g. empty pipe)
+        # or other unhandled argument combinations.
+        print("Error: No operation could be determined. Specify -c, -x, or -t, or provide input for creation.", file=sys.stderr)
+        print("Try 'fmlpack --help' for more information.", file=sys.stderr)
+        sys.exit(1)
+
     if is_create_mode:
         if not args.input:
             print("Error: At least one input file or folder is required for archive creation.", file=sys.stderr)
@@ -471,8 +481,13 @@ def main():
                 sys.stdout.write("".join(fml_content_lines))
                 sys.stdout.flush()
             except BrokenPipeError:
-                sys.stderr.close()
-                sys.exit(0)
+                # Handle cases where stdout pipe is closed (e.g. `fmlpack ... | head`)
+                # This is not an error for fmlpack itself.
+                try:
+                    sys.stderr.close() # Attempt to close stderr to avoid BrokenPipeError there too
+                except Exception: # pylint: disable=broad-except
+                    pass # Ignore errors on stderr close
+                sys.exit(0) # Exit cleanly
         else:
             with open(output_file_path, "w", encoding="utf-8") as f_out:
                 f_out.write("".join(fml_content_lines))
