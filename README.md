@@ -24,7 +24,7 @@ pip install fmlpack
 2.  **Ask `tulp` to generate code based on a prompt and save it as an FML file, then extract it:**
     ```bash
     # Assuming tulp is configured to output FML for such requests
-    fmlpack --help-spec | tulp "Generate a Python project with a main.py and utils.py for a simple calculator, writing the code to the output in FML format" > project.fml
+    fmlpack --spec-help | tulp "Generate a Python project with a main.py and utils.py for a simple calculator, writing the code to the output in FML format" > project.fml
     fmlpack -x -f project.fml -C ./new_calculator_project
     ```
 
