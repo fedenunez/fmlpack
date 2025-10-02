@@ -11,6 +11,13 @@ import pathlib
 import sys
 import glob
 
+# Optional dependency for proper .gitignore-style matching
+try:
+    import pathspec  # type: ignore
+except Exception:  # pylint: disable=broad-except
+    pathspec = None
+
+
 def get_fml_spec():
     return """
 # Filesystem Markup Language (FML)
@@ -100,6 +107,11 @@ def process_arguments():
         action="append",
         help="Exclude files matching PATTERN",
     )
+    parser.add_argument(
+        "--gitignore",
+        action="store_true",
+        help="Also use .gitignore (from the base directory) as ignore patterns when creating an archive",
+    )
     parser.add_argument("input", nargs="*", help="Input files or folders for archive creation")
 
     return parser.parse_args()
@@ -130,19 +142,150 @@ def is_binary_file(file_path):
         return True
     return False
 
-def is_excluded(file_path, exclude_patterns):
-    """Check if a file path matches any of the exclude patterns."""
+def is_excluded_cli(file_path, exclude_patterns):
+    """Check if a file path matches any of the CLI exclude patterns."""
     if not exclude_patterns:
         return False
     for pattern in exclude_patterns:
-        # Normalize the pattern to match any part of the path
         if fnmatch.fnmatch(file_path, pattern) or \
            any(fnmatch.fnmatch(part, pattern) for part in pathlib.Path(file_path).parts):
             return True
     return False
 
 
-def generate_fml(root_dir, files_and_folders, exclude_patterns, include_spec):
+class IgnoreMatcher:
+    """Gitignore-style matcher for .fmlpackignore and optionally .gitignore."""
+    def __init__(self, patterns, use_pathspec):
+        self.use_pathspec = use_pathspec and pathspec is not None
+        self._posix_sep = "/"
+        if self.use_pathspec:
+            self._spec = pathspec.PathSpec.from_lines("gitwildmatch", patterns)
+        else:
+            self._compiled = self._compile_fallback(patterns)
+
+    @staticmethod
+    def _read_patterns_from_file(file_path):
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                return f.read().splitlines()
+        except Exception:  # pylint: disable=broad-except
+            return []
+
+    @staticmethod
+    def _normalize_posix(p):
+        return p.replace(os.sep, "/")
+
+    @staticmethod
+    def _strip_comments_and_blank(lines):
+        cleaned = []
+        for line in lines:
+            # Keep exact gitignore semantics only if pathspec is used.
+            # For fallback: strip comments and blanks.
+            l = line.rstrip("\n\r")
+            if not l:
+                continue
+            if l.lstrip().startswith("#"):
+                continue
+            cleaned.append(l)
+        return cleaned
+
+    @staticmethod
+    def _compile_fallback(patterns):
+        """Compile patterns to a structured list implementing a subset of .gitignore rules."""
+        compiled = []
+        cleaned = IgnoreMatcher._strip_comments_and_blank(patterns)
+        for raw in cleaned:
+            neg = raw.startswith("!")
+            pat = raw[1:] if neg else raw
+
+            dir_only = pat.endswith("/")
+            if dir_only:
+                pat = pat[:-1]
+
+            anchored = pat.startswith("/")
+            if anchored:
+                pat = pat[1:]
+
+            compiled.append({
+                "neg": neg,
+                "dir_only": dir_only,
+                "anchored": anchored,
+                "pat": pat
+            })
+        return compiled
+
+    def matches(self, relpath, is_dir):
+        # Convert to posix
+        rel_posix = self._normalize_posix(relpath)
+
+        if self.use_pathspec:
+            # For directory-only matches, pathspec expects trailing slash for strict dir patterns
+            candidate = rel_posix if not is_dir else (rel_posix if rel_posix.endswith("/") else rel_posix + "/")
+            return self._spec.match_file(candidate)
+
+        # Fallback logic with limited gitignore semantics
+        matched = False
+        parts = rel_posix.split(self._posix_sep) if rel_posix else [rel_posix]
+        for rule in self._compiled:
+            if rule["dir_only"] and not is_dir:
+                continue
+
+            pat = rule["pat"]
+
+            if rule["anchored"]:
+                # Match from repo root
+                if fnmatch.fnmatch(rel_posix, pat):
+                    matched = not rule["neg"]
+            else:
+                if "/" in pat:
+                    # Pattern with slash but not anchored: match against full path
+                    if fnmatch.fnmatch(rel_posix, pat):
+                        matched = not rule["neg"]
+                else:
+                    # No slash: match any path segment (basename match)
+                    if any(fnmatch.fnmatch(seg, pat) for seg in parts):
+                        matched = not rule["neg"]
+        return matched
+
+
+def load_ignore_matcher(root_dir, use_gitignore_flag):
+    """Load .fmlpackignore and optional .gitignore from root_dir and create a matcher."""
+    patterns = []
+
+    fmlpackignore_path = os.path.join(root_dir, ".fmlpackignore")
+    if os.path.isfile(fmlpackignore_path):
+        try:
+            with open(fmlpackignore_path, "r", encoding="utf-8") as f:
+                patterns.extend(f.read().splitlines())
+        except Exception:  # pylint: disable=broad-except
+            pass
+
+    if use_gitignore_flag:
+        gitignore_path = os.path.join(root_dir, ".gitignore")
+        if os.path.isfile(gitignore_path):
+            try:
+                with open(gitignore_path, "r", encoding="utf-8") as f:
+                    patterns.extend(f.read().splitlines())
+            except Exception:  # pylint: disable=broad-except
+                pass
+
+    if not patterns:
+        return None
+
+    # Use pathspec if available for accurate gitignore semantics, otherwise fallback
+    return IgnoreMatcher(patterns, use_pathspec=True if pathspec is not None else False)
+
+
+def should_exclude(relpath, is_dir, exclude_patterns, ignore_matcher):
+    """Unified exclusion: CLI --exclude patterns OR ignore files."""
+    if is_excluded_cli(relpath, exclude_patterns):
+        return True
+    if ignore_matcher and ignore_matcher.matches(relpath, is_dir):
+        return True
+    return False
+
+
+def generate_fml(root_dir, files_and_folders, exclude_patterns, include_spec, ignore_matcher=None):
     """Generate the FML content for the given files and folders."""
     fml_content = []
     errors = [] # Store errors encountered during processing
@@ -170,18 +313,18 @@ def generate_fml(root_dir, files_and_folders, exclude_patterns, include_spec):
             for part in pathlib.Path(parent_dir).parts:
                 current_parent_parts.append(part)
                 dir_to_check = os.path.join(*current_parent_parts)
-                if dir_to_check not in processed_dirs and not is_excluded(dir_to_check, exclude_patterns):
+                if dir_to_check not in processed_dirs and not should_exclude(dir_to_check, True, exclude_patterns, ignore_matcher):
                     fml_content.append(f"<|||dir={dir_to_check}|||>\n")
                     processed_dirs.add(dir_to_check)
 
         if os.path.isdir(item_path_abs):
-            if relative_path not in processed_dirs and not is_excluded(relative_path, exclude_patterns):
+            if relative_path not in processed_dirs and not should_exclude(relative_path, True, exclude_patterns, ignore_matcher):
                 if relative_path != ".": # Avoid <|||dir=.|||> if root_dir itself is listed
                     fml_content.append(f"<|||dir={relative_path}|||>\n")
                 processed_dirs.add(relative_path)
 
         elif os.path.isfile(item_path_abs):
-            if is_excluded(relative_path, exclude_patterns):
+            if should_exclude(relative_path, False, exclude_patterns, ignore_matcher):
                 errors.append(f"Excluding: {relative_path}")
             elif is_binary_file(item_path_abs):
                 errors.append(f"Ignoring binary file: {relative_path}")
@@ -474,7 +617,10 @@ def main():
             root_dir_for_fml = get_common_base_dir(all_files_and_folders_to_archive)
 
 
-        fml_content_lines, errors = generate_fml(root_dir_for_fml, all_files_and_folders_to_archive, args.exclude, args.include_spec)
+        # Load ignore matcher from .fmlpackignore and optionally .gitignore
+        ignore_matcher = load_ignore_matcher(root_dir_for_fml, args.gitignore)
+
+        fml_content_lines, errors = generate_fml(root_dir_for_fml, all_files_and_folders_to_archive, args.exclude, args.include_spec, ignore_matcher=ignore_matcher)
 
         if output_file_path == '-':
             try:
