@@ -6,6 +6,8 @@
 
 ```bash
 pip install fmlpack
+# Optional: install `pathspec` to enable `.gitignore` support
+pip install pathspec
 ```
 
 ## Integration and Usage Examples
@@ -58,7 +60,7 @@ On Linux, `fmlpack` works wonderfully with clipboard tools like `xsel`:
     ```
     This is useful if an LLM provides you with an FML block representing multiple files.
 
-### Basic `fmlpack` Commands
+## Basic `fmlpack` Commands
 
 *   **Create an FML archive:**
     ```bash
@@ -79,9 +81,9 @@ On Linux, `fmlpack` works wonderfully with clipboard tools like `xsel`:
     ```bash
     fmlpack --help
     ```
-*   **Display FML Specification:**
+*   **Include `.gitignore` rules when creating an archive:**
     ```bash
-    fmlpack --spec-help
+    fmlpack -c --gitignore . > project_with_gitignore.fml
     ```
 
 ## Why fmlpack and FML?
@@ -103,3 +105,12 @@ The design of FML was inspired by the clarity of formats like ChatML, aiming for
 FML employs simple tags to represent your file system: `<|||file_start=path/to/file.ext|||>` and `<|||file_end|||>` enclose file content, while `<|||dir=path/to/dir|||>` denotes directories. This clarity makes FML easy for both humans and LLMs to work with. `fmlpack` handles the conversion to and from this format seamlessly.
 
 For a detailed explanation of the format, please see the [full FML Specification](fml-spec.md).
+
+## Changelog
+
+### 2025-10-02
+
+- Added optional dependency `pathspec` for `.gitignore` support.
+- Introduced `--gitignore` flag to use `.gitignore` rules in file filtering.
+- Improved exclusion logic with `IgnoreMatcher` and advanced ignore patterns.
+- Added fallback mechanism if `pathspec` is not installed.

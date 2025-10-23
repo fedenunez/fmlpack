@@ -2,7 +2,7 @@ from setuptools import setup
 
 setup(
     name='fmlpack',
-    version='0.1.0',
+    version='0.2.0',
     py_modules=['fmlpack'],
     package_dir={'': 'src'},
     entry_points={
@@ -10,13 +10,13 @@ setup(
             'fmlpack=fmlpack:main',
         ],
     },
-    install_requires=[],
+    install_requires=['pathspec>=0.10.3'],
     long_description=open('README.md', encoding='utf-8').read(),
     long_description_content_type='text/markdown',
     author='fedenunez',
     author_email='fedenunez+fmlpack@gmail.com',
     description='fmlpack: A tool to convert file trees to/from TEXT, ideal for working with LLM and a lot of files (using Filesystem Markup Language -FML-).',
-    url='https://github.com/fedenunez/fmlpack', # Replace with your new repo URL
+    url='https://github.com/fedenunez/fmlpack',
     license='MIT',
     classifiers=[
         'Programming Language :: Python :: 3',
