@@ -12,6 +12,8 @@ import sys
 import glob
 import pathspec 
 
+__version__ = "0.2.2"
+
 def get_fml_spec():
     return """
 # Filesystem Markup Language (FML)
@@ -79,6 +81,8 @@ def process_arguments():
     parser = argparse.ArgumentParser(
         description="fmlpack: Convert a file tree to/from a Filesystem Markup Language (FML) document."
     )
+
+    parser.add_argument("-v", "--version", action="version", version=f"%(prog)s {__version__}")
 
     # tar like options
     parser.add_argument("-c", "--create", action="store_true", help="Create a new archive (default)")
