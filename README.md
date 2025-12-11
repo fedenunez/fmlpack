@@ -6,15 +6,26 @@
 
 - **Pack**: Archives files and directories into a single FML file.
 - **Unpack**: Extracts files from an FML archive to the filesystem.
-- **Filtering**: Supports `.gitignore`-style exclusion patterns via `.fmlpackignore` and `--exclude`.
+- **Filtering**: Supports `.gitignore` rules via `--gitignore`, plus specific exclusions via `.fmlpackignore` and `--exclude`.
 - **Safety**: Prevents path traversal attacks during extraction.
 
 ## Installation
 
-`fmlpack` is a single-file Python script.
+### Using Pip (Recommended)
 
-1.  Copy `src/fmlpack.py` to a location in your PATH.
-2.  Make it executable: `chmod +x fmlpack.py`.
+Install directly with pip to automatically handle dependencies:
+
+```bash
+pip install fmlpack
+```
+
+### Manual Installation
+
+`fmlpack` is a single-file Python script, but it requires the `pathspec` library.
+
+1.  Install the dependency: `pip install pathspec`.
+2.  Copy `src/fmlpack.py` to a location in your PATH.
+3.  Make it executable: `chmod +x fmlpack.py`.
 
 ## Usage
 
@@ -23,6 +34,9 @@
 ```bash
 # Archive current directory to archive.fml
 fmlpack -c . -f archive.fml
+
+# Archive using .gitignore rules (excludes .git/ automatically)
+fmlpack -c . --gitignore -f archive.fml
 
 # Archive specific files and folders
 fmlpack -c src/ tests/ -f source_code.fml
