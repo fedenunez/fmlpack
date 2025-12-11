@@ -1,4 +1,5 @@
 # FMLPack
+[![codecov](https://codecov.io/gh/fedenunez/fmlpack/branch/main/graph/badge.svg)](https://codecov.io/gh/fedenunez/fmlpack)
 
 `fmlpack` is a tool to convert a file tree to/from a Filesystem Markup Language (FML) document. It creates a single text-based archive of a directory structure, suitable for passing file contexts to LLMs (Large Language Models).
 
@@ -80,4 +81,3 @@ This project uses `pytest` for testing.
     pytest --cov=./src/ tests/test_fmlpack.py
     ```
 
-[![codecov](https://codecov.io/gh/yourusername/fmlpack/branch/main/graph/badge.svg)](https://codecov.io/gh/yourusername/fmlpack)
