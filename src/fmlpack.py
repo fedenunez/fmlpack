@@ -10,13 +10,7 @@ import fnmatch
 import pathlib
 import sys
 import glob
-
-# Optional dependency for proper .gitignore-style matching
-try:
-    import pathspec  # type: ignore
-except Exception:  # pylint: disable=broad-except
-    pathspec = None
-
+import pathspec 
 
 def get_fml_spec():
     return """
@@ -156,56 +150,10 @@ def is_excluded_cli(file_path, exclude_patterns):
 
 
 class IgnoreMatcher:
-    """Gitignore-style matcher for .fmlpackignore and optionally .gitignore."""
-    def __init__(self, ignore_root_dir, patterns, use_pathspec):
+    """Gitignore-style matcher using pathspec."""
+    def __init__(self, ignore_root_dir, patterns):
         self.ignore_root = os.path.abspath(ignore_root_dir)
-        self.use_pathspec = use_pathspec and pathspec is not None
-        self._posix_sep = "/"
-        if self.use_pathspec:
-            self._spec = pathspec.PathSpec.from_lines("gitwildmatch", patterns)
-        else:
-            self._compiled = self._compile_fallback(patterns)
-
-    @staticmethod
-    def _normalize_posix(p):
-        return p.replace(os.sep, "/")
-
-    @staticmethod
-    def _strip_comments_and_blank(lines):
-        cleaned = []
-        for line in lines:
-            l = line.rstrip("\n\r")
-            if not l:
-                continue
-            if l.lstrip().startswith("#"):
-                continue
-            cleaned.append(l)
-        return cleaned
-
-    @staticmethod
-    def _compile_fallback(patterns):
-        """Compile patterns to a structured list implementing a subset of .gitignore rules."""
-        compiled = []
-        cleaned = IgnoreMatcher._strip_comments_and_blank(patterns)
-        for raw in cleaned:
-            neg = raw.startswith("!")
-            pat = raw[1:] if neg else raw
-
-            dir_only = pat.endswith("/")
-            if dir_only:
-                pat = pat[:-1]
-
-            anchored = pat.startswith("/")
-            if anchored:
-                pat = pat[1:]
-
-            compiled.append({
-                "neg": neg,
-                "dir_only": dir_only,
-                "anchored": anchored,
-                "pat": pat
-            })
-        return compiled
+        self._spec = pathspec.PathSpec.from_lines("gitwildmatch", patterns)
 
     def matches(self, abs_path, is_dir):
         """
@@ -221,54 +169,18 @@ class IgnoreMatcher:
         if relpath == '.':
             return False
 
-        # Convert to posix for consistent matching
-        rel_posix = self._normalize_posix(relpath)
+        # Convert to posix for consistent matching with pathspec
+        rel_posix = relpath.replace(os.sep, "/")
 
-        if self.use_pathspec:
-            # For directory-only matches, pathspec expects trailing slash for strict dir patterns
-            candidate = rel_posix if not is_dir else (rel_posix if rel_posix.endswith("/") else rel_posix + "/")
-            try:
-                return self._spec.match_file(candidate)
-            except Exception: # pylint: disable=broad-except
-                 return False
-
-        # Fallback logic with limited gitignore semantics
-        matched = False
-        parts = rel_posix.split(self._posix_sep) if rel_posix else [rel_posix]
+        # For directory-only matches, pathspec expects trailing slash for strict dir patterns
+        # or we rely on match_file vs match_tree behavior.
+        # Ensure we pass the trailing slash if it is a directory to match 'dir/' patterns correctly.
+        candidate = rel_posix + "/" if is_dir else rel_posix
         
-        for rule in self._compiled:
-            pat = rule["pat"]
-            dir_only = rule["dir_only"]
-            anchored = rule["anchored"]
-            
-            rule_matched = False
-
-            # If anchored OR contains slash, it matches against the relative path from root
-            if anchored or "/" in pat:
-                if fnmatch.fnmatch(rel_posix, pat):
-                     if dir_only:
-                         if is_dir: rule_matched = True
-                     else:
-                         rule_matched = True
-            else:
-                # No slash and not anchored: match any path segment (recursive)
-                for i, seg in enumerate(parts):
-                    if fnmatch.fnmatch(seg, pat):
-                        # If dir_only, the matched segment must be a directory.
-                        # It is a directory if it's not the last part, OR if is_dir is True.
-                        if dir_only:
-                            is_segment_dir = (i < len(parts) - 1) or is_dir
-                            if is_segment_dir:
-                                rule_matched = True
-                        else:
-                            rule_matched = True
-                    if rule_matched:
-                        break
-
-            if rule_matched:
-                matched = not rule["neg"]
-                
-        return matched
+        try:
+            return self._spec.match_file(candidate)
+        except Exception: # pylint: disable=broad-except
+             return False
 
 
 def find_project_root(start_dir):
@@ -317,13 +229,13 @@ def load_ignore_matcher(start_dir, use_gitignore_flag):
             except Exception:  # pylint: disable=broad-except
                 pass
         
-        # Must-Fix: Always exclude .git directory when flag is used, even if not in .gitignore
+        # Explicitly ignore .git/ when using gitignore flag
         patterns.append(".git/")
 
     if not patterns:
         return None
 
-    return IgnoreMatcher(project_root, patterns, use_pathspec=True if pathspec is not None else False)
+    return IgnoreMatcher(project_root, patterns)
 
 
 def should_exclude(abs_path, rel_path_archive, is_dir, exclude_patterns, ignore_matcher):

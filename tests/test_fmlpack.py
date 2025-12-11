@@ -47,7 +47,7 @@ except ImportError:
     def extract_fml_archive(a, t, extra=None): pass
     def list_fml_archive(a): pass
     class IgnoreMatcher:
-        def __init__(self, r, p, u): pass
+        def __init__(self, r, p): pass
         def matches(self, p, d): return False
 
 
@@ -152,7 +152,7 @@ class TestHelperFunctions:
 @pytest.mark.skipif(not FMLPACK_MODULE_IMPORTED, reason="fmlpack module not directly importable")
 class TestIgnoreMatcherLogic:
     def test_basic_ignores(self, tmp_path: pathlib.Path):
-        matcher = IgnoreMatcher(str(tmp_path), ["*.log", "temp/"], False)
+        matcher = IgnoreMatcher(str(tmp_path), ["*.log", "temp/"])
         
         # Should match
         assert matcher.matches(str(tmp_path / "error.log"), False)
@@ -165,7 +165,7 @@ class TestIgnoreMatcherLogic:
         assert not matcher.matches(str(tmp_path / "temporary" / "file.txt"), False) # "temp/" matches dir only
 
     def test_anchored_ignores(self, tmp_path: pathlib.Path):
-        matcher = IgnoreMatcher(str(tmp_path), ["/root_only.txt"], False)
+        matcher = IgnoreMatcher(str(tmp_path), ["/root_only.txt"])
         # Matches root_only.txt in base dir
         assert matcher.matches(str(tmp_path / "root_only.txt"), False)
         # Should NOT match root_only.txt in subdirectory
@@ -179,7 +179,7 @@ class TestIgnoreMatcherLogic:
             "!important.tmp", # Negation
             "/config.json"  # Anchored
         ]
-        matcher = IgnoreMatcher(str(tmp_path), patterns, False)
+        matcher = IgnoreMatcher(str(tmp_path), patterns)
 
         assert matcher.matches(str(tmp_path / "debug"), True)
         assert matcher.matches(str(tmp_path / "src" / "debug"), True)
@@ -200,56 +200,23 @@ class TestIgnoreMatcherLogic:
         assert not matcher.matches(str(tmp_path / "subdir" / "config.json"), False)
         
     def test_ignore_outside_root(self, tmp_path: pathlib.Path):
-        matcher = IgnoreMatcher(str(tmp_path / "inner"), ["*.log"], False)
+        matcher = IgnoreMatcher(str(tmp_path / "inner"), ["*.log"])
         # File outside root
         assert not matcher.matches(str(tmp_path / "outside.log"), False)
         
     def test_ignore_root_itself(self, tmp_path: pathlib.Path):
-        matcher = IgnoreMatcher(str(tmp_path), ["foo"], False)
+        matcher = IgnoreMatcher(str(tmp_path), ["foo"])
         assert not matcher.matches(str(tmp_path), True)
 
     def test_negation(self, tmp_path: pathlib.Path):
-        matcher = IgnoreMatcher(str(tmp_path), ["*.log", "!important.log"], False)
+        matcher = IgnoreMatcher(str(tmp_path), ["*.log", "!important.log"])
         assert matcher.matches(str(tmp_path / "error.log"), False)
         assert not matcher.matches(str(tmp_path / "important.log"), False)
         
     def test_ignore_comments_and_blanks(self, tmp_path: pathlib.Path):
         patterns = ["# comment", "  ", "*.log"]
-        matcher = IgnoreMatcher(str(tmp_path), patterns, False)
+        matcher = IgnoreMatcher(str(tmp_path), patterns)
         assert matcher.matches(str(tmp_path / "test.log"), False)
-
-    def test_fallback_compilation_and_matching(self, tmp_path):
-        """Force use_pathspec=False to test manual fallback implementation details."""
-        patterns = ["!neg.txt", "dir_only/", "/anchored.txt", "simple.txt", "sub/path.txt"]
-        # use_pathspec=False is implied in current env if pathspec not installed, but forced here
-        matcher = IgnoreMatcher(str(tmp_path), patterns, use_pathspec=False)
-        
-        # Negation logic test
-        matcher_neg = IgnoreMatcher(str(tmp_path), ["*.txt", "!keep.txt"], use_pathspec=False)
-        # Use ABSOLUTE paths for testing matches()
-        assert matcher_neg.matches(str(tmp_path / "junk.txt"), False)
-        assert not matcher_neg.matches(str(tmp_path / "keep.txt"), False)
-
-        # Dir Only
-        matcher_dir = IgnoreMatcher(str(tmp_path), ["build/"], use_pathspec=False)
-        assert matcher_dir.matches(str(tmp_path / "build"), True)
-        assert not matcher_dir.matches(str(tmp_path / "build"), False)
-        
-        # Anchored
-        matcher_anchor = IgnoreMatcher(str(tmp_path), ["/root"], use_pathspec=False)
-        assert matcher_anchor.matches(str(tmp_path / "root"), False)
-        assert not matcher_anchor.matches(str(tmp_path / "sub" / "root"), False)
-        
-        # Simple (basename match)
-        matcher_simple = IgnoreMatcher(str(tmp_path), ["*.log"], use_pathspec=False)
-        assert matcher_simple.matches(str(tmp_path / "foo.log"), False)
-        assert matcher_simple.matches(str(tmp_path / "a" / "b" / "c.log"), False)
-        
-        # Path with slash (not anchored)
-        matcher_path = IgnoreMatcher(str(tmp_path), ["src/gen"], use_pathspec=False)
-        assert matcher_path.matches(str(tmp_path / "src" / "gen"), False)
-        # Should NOT match recursively because it contains a slash (gitignore rule)
-        assert not matcher_path.matches(str(tmp_path / "a" / "src" / "gen"), False) 
 
 
 @pytest.mark.skipif(not FMLPACK_MODULE_IMPORTED, reason="fmlpack module not directly importable")
@@ -436,7 +403,6 @@ class TestProjectRootFinding:
             # Should not crash
             matcher = load_ignore_matcher(str(tmp_path), True)
             # Should return matcher with default .git/ rule if flag is True
-            # FIX: Use absolute path for testing matches()
             assert matcher is not None
             assert matcher.matches(str(tmp_path / ".git" / "HEAD"), False)
 

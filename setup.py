@@ -10,10 +10,7 @@ setup(
             'fmlpack=fmlpack:main',
         ],
     },
-    install_requires=[], # No mandatory dependencies for basic usage
-    extras_require={
-        'ignore': ['pathspec>=0.10.3'], # Optional for robust gitignore support
-    },
+    install_requires=['pathspec>=0.10.3'],
     long_description=open('README.md', encoding='utf-8').read(),
     long_description_content_type='text/markdown',
     author='fedenunez',
