@@ -638,8 +638,9 @@ def main():
 
         if output_file_path == '-':
             try:
-                sys.stdout.write("".join(fml_content_lines))
-                sys.stdout.flush()
+                # FIX: Use buffer write to support UTF-8 on Windows consoles without crash
+                sys.stdout.buffer.write("".join(fml_content_lines).encode("utf-8"))
+                sys.stdout.buffer.flush()
             except BrokenPipeError:
                 try:
                     sys.stderr.close() 
