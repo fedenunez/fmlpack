@@ -29,7 +29,7 @@ jobs:
 
 
     - name: Upload results to Codecov
-        uses: codecov/codecov-action@v5
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-        slug: fedenunez/fmlpack  # Optional but recommended
+      uses: codecov/codecov-action@v5
+      with:
+        token: ${{ secrets.CODECOV_TOKEN }}
+      slug: fedenunez/fmlpack  # Optional but recommended
