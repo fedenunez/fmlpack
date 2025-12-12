@@ -1,7 +1,10 @@
 *.fml
 .venv/
+build/
 venv/
 .git/
+.github/
 .pytest_cache/
 __pycache__/
 dist/
+src/fmlpack.egg-info/
