@@ -9,6 +9,7 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    environment: actions       # must match exactly
 
     steps:
     - uses: actions/checkout@v4
@@ -28,7 +29,6 @@ jobs:
         pytest --cov=./src/ tests/test_fmlpack.py --cov-branch --cov-report=xml --cov-report=term
 
     - name: Debug secret
-      environment: actions       # must match exactly
       run: |
         echo "CODECOV_TOKEN length: ${#CODECOV_TOKEN}"
         echo "CODECOV_TOKEN first 5: ${CODECOV_TOKEN:0:5}"
@@ -37,7 +37,6 @@ jobs:
 
     - name: Upload results to Codecov
       uses: codecov/codecov-action@v5
-      environment: actions       # must match exactly
       with:
         token: ${{ secrets.CODECOV_TOKEN }}
         slug: fedenunez/fmlpack  # Optional but recommended
