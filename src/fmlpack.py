@@ -120,6 +120,12 @@ def get_relative_path(root_dir, file_path):
     """
     return os.path.relpath(file_path, root_dir)
 
+def to_posix_path(path):
+    """
+    Convert a path to POSIX style (forward slashes), suitable for FML tags.
+    """
+    return path.replace(os.sep, '/')
+
 def is_binary_file(file_path):
     """
     Check if a file is a binary file based on its content.
@@ -292,7 +298,8 @@ def generate_fml(root_dir, files_and_folders, exclude_patterns, include_spec, ig
                 
                 if dir_to_check_rel not in processed_dirs:
                     if not should_exclude(dir_to_check_abs, dir_to_check_rel, True, exclude_patterns, ignore_matcher):
-                        fml_content.append(f"<|||dir={dir_to_check_rel}|||>\n")
+                        # Ensure POSIX style output
+                        fml_content.append(f"<|||dir={to_posix_path(dir_to_check_rel)}|||>\n")
                         processed_dirs.add(dir_to_check_rel)
                     else:
                         processed_dirs.add(dir_to_check_rel) # Mark as processed so we don't check again, even if excluded
@@ -301,7 +308,7 @@ def generate_fml(root_dir, files_and_folders, exclude_patterns, include_spec, ig
             if relative_path not in processed_dirs:
                 if not should_exclude(item_path_abs, relative_path, True, exclude_patterns, ignore_matcher):
                     if relative_path != ".": # Avoid <|||dir=.|||>
-                        fml_content.append(f"<|||dir={relative_path}|||>\n")
+                        fml_content.append(f"<|||dir={to_posix_path(relative_path)}|||>\n")
                     processed_dirs.add(relative_path)
 
         elif os.path.isfile(item_path_abs):
@@ -309,9 +316,9 @@ def generate_fml(root_dir, files_and_folders, exclude_patterns, include_spec, ig
                 # Silent exclusion is preferred for ignore files.
                 pass 
             elif is_binary_file(item_path_abs):
-                errors.append(f"Ignoring binary file: {relative_path}")
+                errors.append(f"Ignoring binary file: {to_posix_path(relative_path)}")
             else:
-                fml_content.append(f"<|||file_start={relative_path}|||>\n")
+                fml_content.append(f"<|||file_start={to_posix_path(relative_path)}|||>\n")
                 try:
                     with open(item_path_abs, "r", encoding="utf-8") as f:
                         content=f.read()
@@ -319,9 +326,9 @@ def generate_fml(root_dir, files_and_folders, exclude_patterns, include_spec, ig
                             content += '\n'
                         fml_content.append(content)
                 except UnicodeDecodeError as e:
-                    errors.append(f"Error reading file {relative_path}: {e}")
+                    errors.append(f"Error reading file {to_posix_path(relative_path)}: {e}")
                 except Exception as e: # pylint: disable=broad-except
-                    errors.append(f"Could not process file {relative_path}: {e}")
+                    errors.append(f"Could not process file {to_posix_path(relative_path)}: {e}")
                 fml_content.append("<|||file_end|||>\n")
         elif not os.path.exists(item_path_abs):
              offending_item_display_path = get_relative_path(root_dir_abs, item_path_abs)
