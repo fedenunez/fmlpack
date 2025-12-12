@@ -25,10 +25,11 @@ jobs:
 
     - name: Run tests with coverage
       run: |
-        pytest --cov=./src/ tests/test_fmlpack.py --cov-report=xml --cov-report=term
+        pytest --cov=./src/ tests/test_fmlpack.py --cov-branch --cov-report=xml --cov-report=term
 
-    - name: Upload coverage reports to Codecov
-      uses: codecov/codecov-action@v4.0.1
-      with:
-        token: ${{ secrets.CODECOV_TOKEN }}
+
+    - name: Upload results to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
         slug: fedenunez/fmlpack  # Optional but recommended
