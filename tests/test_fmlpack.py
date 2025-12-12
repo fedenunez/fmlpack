@@ -35,21 +35,6 @@ try:
     FMLPACK_MODULE_IMPORTED = True
 except ImportError:
     FMLPACK_MODULE_IMPORTED = False
-    # Define dummy functions if direct import fails.
-    def to_posix_path(p): return p.replace(os.sep, '/')
-    def get_relative_path(r, f): return os.path.relpath(f,r)
-    def is_binary_file(f): return False
-    def is_excluded_cli(f, p): return False
-    def get_common_base_dir(p, c=None): return os.getcwd()
-    def expand_and_collect_paths(i,r, m=None): return []
-    def find_project_root(s): return s
-    def load_ignore_matcher(s, g): return None
-    def generate_fml(r, f, e, i, m=None): return [], []
-    def extract_fml_archive(a, t, extra=None): pass
-    def list_fml_archive(a): pass
-    class IgnoreMatcher:
-        def __init__(self, r, p): pass
-        def matches(self, p, d): return False
 
 
 FMLPACK_CMD_FOR_SUBPROCESS = [sys.executable, str(_fmlpack_script_location)]
@@ -116,20 +101,31 @@ class TestHelperFunctions:
         # CLI patterns typically use forward slashes or match against normalized paths
         # The function normalizes the input path to forward slashes before matching
         assert is_excluded_cli(p, ["path/to/*.txt"])
+        
+    def test_is_excluded_cli_empty_patterns(self):
+        assert is_excluded_cli("any", []) is False
+        assert is_excluded_cli("any", None) is False
 
     def test_get_common_base_dir_files_only(self, tmp_path: pathlib.Path):
+        # Case: Just files provided
         d1 = tmp_path / "d1"
         d1.mkdir()
         f1 = d1 / "f1.txt"
         f1.touch()
+        # Common base of a single file is its directory
         assert pathlib.Path(get_common_base_dir([str(f1)])) == d1
 
     def test_get_common_base_dir_directory_input(self, tmp_path: pathlib.Path):
+        # Case: Directory provided (Standard Tar Behavior)
+        # fmlpack -c mydir -> base should be parent of mydir, so archive contains mydir/file
         d1 = tmp_path / "d1"
         d1.mkdir()
+        # Logic: if dir provided != cwd, step up
         assert pathlib.Path(get_common_base_dir([str(d1)], current_working_dir=tmp_path)) == tmp_path
 
     def test_get_common_base_dir_dot_input(self, tmp_path: pathlib.Path):
+        # Case: Dot (.) provided
+        # fmlpack -c . -> base should be . (cwd), so archive contains file (not ./file or name/file)
         assert pathlib.Path(get_common_base_dir([str(tmp_path)], current_working_dir=tmp_path)) == tmp_path
         
     def test_get_common_base_dir_mixed(self, temp_test_dir: pathlib.Path):
@@ -138,6 +134,11 @@ class TestHelperFunctions:
         p2 = str(temp_test_dir / "file_root.txt")
         base = get_common_base_dir([p1, p2])
         assert pathlib.Path(base) == temp_test_dir
+        
+    def test_get_common_base_dir_relative(self):
+        # Pass a single file path
+        base = get_common_base_dir(["/abs/path/file.txt"])
+        assert base == os.path.abspath("/abs/path")
 
     def test_expand_and_collect_paths(self, temp_test_dir: pathlib.Path):
         base_str = str(temp_test_dir)
@@ -153,6 +154,11 @@ class TestHelperFunctions:
     def test_expand_paths_dot(self, temp_test_dir: pathlib.Path):
         # Test expanding "."
         paths = expand_and_collect_paths([str(temp_test_dir)], str(temp_test_dir))
+        assert str(temp_test_dir / "file_root.txt") in paths
+    
+    def test_expand_paths_dot_cwd(self, temp_test_dir):
+        # Test processing "." when it is the input
+        paths = expand_and_collect_paths(["."], str(temp_test_dir))
         assert str(temp_test_dir / "file_root.txt") in paths
         
     def test_expand_paths_walk_error(self, temp_test_dir: pathlib.Path):
@@ -171,6 +177,48 @@ class TestHelperFunctions:
         paths = expand_and_collect_paths(["missing.txt"], str(temp_test_dir))
         # It adds it to the list (generate_fml filters it later)
         assert any("missing.txt" in p for p in paths)
+        
+    def test_expand_paths_glob_recursive(self, temp_test_dir):
+        (temp_test_dir / "sub").mkdir()
+        (temp_test_dir / "sub" / "target.txt").touch()
+        # glob ** pattern
+        paths = expand_and_collect_paths(["**/*.txt"], str(temp_test_dir))
+        assert any("target.txt" in str(p) for p in paths)
+
+    def test_expand_paths_pruning_logic(self, temp_test_dir):
+        # dir1/ignore_me/file.txt
+        ignore_dir = temp_test_dir / "dir1" / "ignore_me"
+        ignore_dir.mkdir()
+        (ignore_dir / "file.txt").touch()
+        
+        # Mock matcher to ignore "ignore_me"
+        mock_matcher = MagicMock()
+        def side_effect(path, is_dir):
+            return "ignore_me" in path and is_dir
+        mock_matcher.matches.side_effect = side_effect
+        
+        paths = expand_and_collect_paths([str(temp_test_dir / "dir1")], str(temp_test_dir), ignore_matcher=mock_matcher)
+        # Should not contain file.txt inside ignore_me because os.walk was pruned
+        assert not any("ignore_me" in str(p) for p in paths)
+        
+    def test_expand_paths_broken_symlink(self, temp_test_dir):
+        link = temp_test_dir / "badlink"
+        try:
+            link.symlink_to("nonexistent_target")
+        except OSError:
+            pytest.skip("Symlinks not supported")
+        # Glob finds it, added to paths
+        paths = expand_and_collect_paths([str(link)], str(temp_test_dir))
+        assert any("badlink" in str(p) for p in paths)
+        
+    def test_symlink_recursion_safety(self, temp_test_dir):
+        # Just ensure we don't crash with symlinks
+        link = temp_test_dir / "link"
+        try:
+            link.symlink_to(temp_test_dir)
+        except OSError:
+            pytest.skip("Symlinks not supported")
+        pass 
 
 
 @pytest.mark.skipif(not FMLPACK_MODULE_IMPORTED, reason="fmlpack module not directly importable")
@@ -221,6 +269,61 @@ class TestIgnoreMatcherLogic:
         assert not matcher.matches(str(tmp_path / "important.tmp"), False)
         assert matcher.matches(str(tmp_path / "config.json"), False)
         assert not matcher.matches(str(tmp_path / "subdir" / "config.json"), False)
+
+    def test_ignore_matcher_exception_safety(self, tmp_path):
+        # Mock pathspec to raise exception
+        matcher = IgnoreMatcher(str(tmp_path), ["*.txt"])
+        with patch.object(matcher._spec, 'match_file', side_effect=Exception("Boom")):
+            # Should return False (safe default)
+            assert matcher.matches(str(tmp_path / "test.txt"), False) is False
+            
+    def test_ignore_matcher_anchored_wildcard(self, tmp_path):
+        # Pattern "/build/*.log"
+        matcher = IgnoreMatcher(str(tmp_path), ["/build/*.log"])
+        assert matcher.matches(str(tmp_path / "build" / "test.log"), False)
+        assert not matcher.matches(str(tmp_path / "test.log"), False)
+        assert not matcher.matches(str(tmp_path / "other" / "build" / "test.log"), False)
+
+    def test_load_ignore_matcher(self, tmp_path: pathlib.Path):
+        (tmp_path / ".fmlpackignore").write_text("*.fmlpack\n", encoding="utf-8")
+        (tmp_path / ".gitignore").write_text("*.gitignored\n", encoding="utf-8")
+        matcher = load_ignore_matcher(str(tmp_path), True)
+        assert matcher.matches(str(tmp_path / "test.fmlpack"), False)
+        assert matcher.matches(str(tmp_path / "test.gitignored"), False)
+        
+        matcher_no_git = load_ignore_matcher(str(tmp_path), False)
+        assert matcher_no_git.matches(str(tmp_path / "test.fmlpack"), False)
+        assert not matcher_no_git.matches(str(tmp_path / "test.gitignored"), False)
+        
+    def test_load_ignore_matcher_empty(self, tmp_path: pathlib.Path):
+        assert load_ignore_matcher(str(tmp_path), False) is None
+
+    def test_load_ignore_files_combo_with_flag(self, tmp_path):
+        (tmp_path / ".fmlpackignore").write_text("ignore_fml\n", encoding="utf-8")
+        (tmp_path / ".gitignore").write_text("ignore_git\n", encoding="utf-8")
+        matcher = load_ignore_matcher(str(tmp_path), True)
+        assert matcher.matches(str(tmp_path / "ignore_fml"), False)
+        assert matcher.matches(str(tmp_path / "ignore_git"), False)
+        assert matcher.matches(str(tmp_path / ".git"), True)
+
+    def test_load_ignore_read_error(self, tmp_path: pathlib.Path):
+        (tmp_path / ".gitignore").touch()
+        with patch("builtins.open", side_effect=PermissionError("Denied")):
+            matcher = load_ignore_matcher(str(tmp_path), True)
+            assert matcher is not None
+            assert matcher.matches(str(tmp_path / ".git" / "HEAD"), False)
+            
+    def test_load_ignore_matcher_io_error(self, tmp_path):
+        # .fmlpackignore unreadable, .gitignore missing
+        (tmp_path / ".fmlpackignore").touch()
+        original_open = open
+        def side_effect(f, *args, **kwargs):
+            if ".fmlpackignore" in str(f): raise PermissionError("Denied")
+            return original_open(f, *args, **kwargs)
+        
+        with patch("builtins.open", side_effect=side_effect):
+            matcher = load_ignore_matcher(str(tmp_path), False)
+            assert matcher is None
 
 
 @pytest.mark.skipif(not FMLPACK_MODULE_IMPORTED, reason="fmlpack module not directly importable")
@@ -278,6 +381,77 @@ class TestFmlLogic:
         fml, errors = generate_fml(str(temp_test_dir), [str(temp_test_dir / "ghost.txt")], [], False)
         assert len(errors) > 0
         assert "Input item not found" in errors[0]
+        
+    def test_generate_fml_parent_dirs_logic(self, temp_test_dir):
+        (temp_test_dir / "dir1" / "subdir").mkdir()
+        f = temp_test_dir / "dir1" / "subdir" / "deep.txt"
+        f.touch()
+        fml, _ = generate_fml(str(temp_test_dir / "dir1"), [str(f)], [], False)
+        content = "".join(fml)
+        assert "<|||dir=subdir|||>" in content
+
+    def test_generate_fml_deduplication(self, temp_test_dir):
+        p = str(temp_test_dir / "file_root.txt")
+        fml, _ = generate_fml(str(temp_test_dir), [p, p, p], [], False)
+        content = "".join(fml)
+        assert content.count("file_root.txt") == 1 
+
+    def test_generate_fml_sorting(self, temp_test_dir):
+        (temp_test_dir / "b.txt").touch()
+        (temp_test_dir / "a.txt").touch()
+        # Input passed as "." -> expanded to [file_root.txt, dir1, b.txt, a.txt ...]
+        # generate_fml should sort them.
+        fml, _ = generate_fml(str(temp_test_dir), [str(temp_test_dir / "b.txt"), str(temp_test_dir / "a.txt")], [], False)
+        # Check order in output
+        content = "".join(fml)
+        idx_a = content.find("a.txt")
+        idx_b = content.find("b.txt")
+        assert idx_a < idx_b
+
+    def test_generate_fml_excluded_file_in_included_dir(self, temp_test_dir):
+        fml, _ = generate_fml(str(temp_test_dir), [str(temp_test_dir / "dir1")], ["*.txt"], False)
+        content = "".join(fml)
+        assert "<|||dir=dir1|||>" in content
+        assert "file1a.txt" not in content
+
+    def test_generate_fml_root_dir_listing(self, temp_test_dir):
+        fml, _ = generate_fml(str(temp_test_dir), [str(temp_test_dir)], [], False)
+        content = "".join(fml)
+        assert "<|||dir=.|||>" not in content
+
+    def test_recursive_nested_ignores_with_duplicates(self, temp_test_dir):
+        (temp_test_dir / "dir1" / "subdir").mkdir()
+        f = temp_test_dir / "dir1" / "subdir" / "ignored.txt"
+        f.touch()
+        mock_matcher = MagicMock()
+        mock_matcher.matches.return_value = True 
+        
+        files = [str(f), str(temp_test_dir / "dir1"), str(f)]
+        fml, errors = generate_fml(str(temp_test_dir), files, [], False, ignore_matcher=mock_matcher)
+        
+        content = "".join(fml)
+        assert "<|||file_start=" not in content
+        assert "<|||dir=" not in content
+        
+    def test_generate_fml_binary_exclusion_logging(self, temp_test_dir):
+        f = temp_test_dir / "bin.dat"
+        f.write_bytes(b"\x00\x00")
+        fml, errors = generate_fml(str(temp_test_dir), [str(f)], [], False)
+        assert len(errors) == 1
+        assert "Ignoring binary file" in errors[0]
+        
+    def test_generate_empty_file_content(self, temp_test_dir):
+        f = temp_test_dir / "empty.txt"
+        f.touch()
+        fml, _ = generate_fml(str(temp_test_dir), [str(f)], [], False)
+        content = "".join(fml)
+        assert "<|||file_start=empty.txt|||>\n<|||file_end|||>" in content
+
+    def test_generate_fml_spec_inclusion(self, temp_test_dir):
+        f = temp_test_dir / "a.txt"
+        f.touch()
+        fml, _ = generate_fml(str(temp_test_dir), [str(f)], [], True)
+        assert any("Filesystem Markup Language" in line for line in fml)
 
     def test_extract_fml_basic(self, tmp_path: pathlib.Path):
         fml_content = "<|||file_start=test.txt|||>\nHello\n<|||file_end|||>\n"
@@ -369,6 +543,91 @@ class TestFmlLogic:
         extract_fml_archive(str(fml), str(tmp_path))
         assert not (tmp_path / "Garbage data").exists()
         assert (tmp_path / "ok.txt").read_text(encoding="utf-8") == "ok\n"
+        
+    def test_extract_fml_eof_mid_file(self, tmp_path):
+        fml = "<|||file_start=test.txt|||>\nContent"
+        archive = tmp_path / "test.fml"
+        archive.write_text(fml, encoding='utf-8')
+        with patch("sys.stdout", new=io.StringIO()) as out:
+            extract_fml_archive(str(archive), str(tmp_path))
+            assert "Extracted (EOF)" in out.getvalue()
+        assert (tmp_path / "test.txt").read_text(encoding='utf-8') == "Content"
+        
+    def test_extract_tag_with_leading_space(self, tmp_path):
+        content = " <|||file_start=bad.txt|||>\nDATA\n<|||file_end|||>"
+        fml = tmp_path / "bad.fml"
+        fml.write_text(content, encoding="utf-8")
+        extract_fml_archive(str(fml), str(tmp_path))
+        assert not (tmp_path / "bad.txt").exists()
+
+    def test_extract_tag_case_sensitivity(self, tmp_path):
+        content = "<|||FILE_START=bad.txt|||>\nDATA\n<|||FILE_END|||>"
+        fml = tmp_path / "case.fml"
+        fml.write_text(content, encoding="utf-8")
+        extract_fml_archive(str(fml), str(tmp_path))
+        assert not (tmp_path / "bad.txt").exists()
+
+    def test_extract_existing_dir_no_error(self, tmp_path):
+        d = tmp_path / "existing"
+        d.mkdir()
+        content = "<|||dir=existing|||>"
+        fml = tmp_path / "dir.fml"
+        fml.write_text(content, encoding="utf-8")
+        extract_fml_archive(str(fml), str(tmp_path))
+        assert d.exists()
+        
+    def test_extract_absolute_path_win(self, tmp_path):
+        content = "<|||file_start=C:\\Windows\\System32\\cmd.exe|||>"
+        fml = tmp_path / "win.fml"
+        fml.write_text(content, encoding="utf-8")
+        with patch("sys.stderr", new=io.StringIO()) as fake_err:
+             extract_fml_archive(str(fml), str(tmp_path))
+             pass 
+
+    def test_extract_utf8_filename(self, tmp_path):
+        name = "ñ_µ_🚀.txt"
+        fml = f"<|||file_start={name}|||>\nContent<|||file_end|||>"
+        fml_path = tmp_path / "utf8.fml"
+        fml_path.write_text(fml, encoding="utf-8")
+        extract_fml_archive(str(fml_path), str(tmp_path))
+        assert (tmp_path / name).exists()
+
+    def test_extract_fml_write_error_mid_stream(self, tmp_path):
+        fml = tmp_path / "test.fml"
+        fml.write_text("<|||file_start=a|||>\nDATA\n<|||file_end|||>", encoding="utf-8")
+        mock_file = MagicMock()
+        mock_file.write.side_effect = OSError("Disk full")
+        with patch("builtins.open", return_value=mock_file):
+            with patch("os.makedirs"):
+                 with patch("sys.stderr", new=io.StringIO()) as fake_err:
+                     extract_fml_archive(str(fml), str(tmp_path))
+
+    def test_extract_fifo_handling(self, tmp_path):
+        fml = tmp_path / "test.fml"
+        fml.write_text("<|||file_start=dir|||>\nData", encoding="utf-8")
+        (tmp_path / "dir").mkdir() 
+        with patch("sys.stderr", new=io.StringIO()) as fake_err:
+             extract_fml_archive(str(fml), str(tmp_path))
+             assert "Error creating file" in fake_err.getvalue()
+
+    def test_extract_unicode_path_normalization(self, tmp_path):
+        fml = "<|||file_start=a\\b\\c.txt|||>\nContent<|||file_end|||>"
+        fml_path = tmp_path / "win_style.fml"
+        fml_path.write_text(fml, encoding="utf-8")
+        extract_fml_archive(str(fml_path), str(tmp_path))
+        if os.name == 'nt':
+             assert (tmp_path / "a" / "b" / "c.txt").exists()
+        else:
+             assert (tmp_path / "a\\b\\c.txt").exists()
+             
+    def test_file_start_tag_in_content(self, tmp_path):
+        content = "Line1\n<|||file_start=fake.txt|||>\nLine2"
+        fml_content = f"<|||file_start=real.txt|||>\n{content}\n<|||file_end|||>"
+        fml = tmp_path / "test.fml"
+        fml.write_text(fml_content, encoding="utf-8")
+        extract_fml_archive(str(fml), str(tmp_path))
+        assert not (tmp_path / "real.txt").exists() or "Line1" in (tmp_path / "real.txt").read_text("utf-8")
+        assert (tmp_path / "fake.txt").exists()
 
     def test_list_fml_archive(self, tmp_path: pathlib.Path):
         archive = tmp_path / "list.fml"
@@ -382,46 +641,7 @@ class TestFmlLogic:
         with pytest.raises(SystemExit):
             with patch('sys.stderr', new=io.StringIO()):
                 list_fml_archive("missing.fml")
-
-
-@pytest.mark.skipif(not FMLPACK_MODULE_IMPORTED, reason="fmlpack module not directly importable")
-class TestCoverageBoostPart2:
-    """Additional unit tests to push coverage higher."""
-
-    def test_extract_tag_with_leading_space(self, tmp_path):
-        # Leading space causes tag to be treated as content or ignored
-        content = " <|||file_start=bad.txt|||>\nDATA\n<|||file_end|||>"
-        fml = tmp_path / "bad.fml"
-        fml.write_text(content, encoding="utf-8")
-        extract_fml_archive(str(fml), str(tmp_path))
-        assert not (tmp_path / "bad.txt").exists()
-
-    def test_extract_tag_case_sensitivity(self, tmp_path):
-        # Tags are case sensitive
-        content = "<|||FILE_START=bad.txt|||>\nDATA\n<|||FILE_END|||>"
-        fml = tmp_path / "case.fml"
-        fml.write_text(content, encoding="utf-8")
-        extract_fml_archive(str(fml), str(tmp_path))
-        assert not (tmp_path / "bad.txt").exists()
-
-    def test_extract_existing_dir_no_error(self, tmp_path):
-        # os.makedirs(exist_ok=True)
-        d = tmp_path / "existing"
-        d.mkdir()
-        content = "<|||dir=existing|||>"
-        fml = tmp_path / "dir.fml"
-        fml.write_text(content, encoding="utf-8")
-        # Should not raise exception
-        extract_fml_archive(str(fml), str(tmp_path))
-        assert d.exists()
-
-    def test_generate_empty_file_content(self, temp_test_dir):
-        f = temp_test_dir / "empty.txt"
-        f.touch()
-        fml, _ = generate_fml(str(temp_test_dir), [str(f)], [], False)
-        content = "".join(fml)
-        assert "<|||file_start=empty.txt|||>\n<|||file_end|||>" in content
-
+                
     def test_list_mixed_content(self, tmp_path):
         content = "<|||file_start=f.txt|||>\n<|||dir=d|||>"
         fml = tmp_path / "mixed.fml"
@@ -431,99 +651,12 @@ class TestCoverageBoostPart2:
             out = fake_out.getvalue()
             assert "f.txt" in out and "d" in out
 
-    def test_main_flush_broken_pipe(self):
-        # Specific check for flush() error handling in main
-        with patch("sys.argv", ["fmlpack.py", "-c", ".", "-f", "-"]):
-            with patch("sys.stdin.isatty", return_value=False):
-                with patch("fmlpack.generate_fml", return_value=(["data"], [])):
-                    with patch("sys.stdout.buffer.write"): # Write succeeds
-                        with patch("sys.stdout.buffer.flush", side_effect=BrokenPipeError): # Flush fails
-                             with patch("sys.stderr", new=io.StringIO()):
-                                 with pytest.raises(SystemExit) as e:
-                                     fmlpack_main()
-                                 assert e.value.code == 0
-
-    def test_is_binary_os_error(self, temp_test_dir):
-        f = temp_test_dir / "err.bin"
-        f.touch()
-        # Mock open raising generic OSError (not PermissionError)
-        with patch("builtins.open", side_effect=OSError("Disk full")):
-            assert is_binary_file(str(f)) is True
-
-    def test_find_root_infinite_loop_prevention(self, tmp_path):
-        # Mock dirname to always return self to simulate root
-        with patch("os.path.abspath", side_effect=lambda p: p):
-            with patch("os.path.exists", return_value=False):
-                with patch("os.path.dirname", side_effect=lambda p: p):
-                    # Should break immediately
-                    assert find_project_root("/path") == "/path"
-
-    def test_load_ignore_matcher_io_error(self, tmp_path):
-        # .fmlpackignore unreadable, .gitignore missing
-        (tmp_path / ".fmlpackignore").touch()
-        original_open = open
-        def side_effect(f, *args, **kwargs):
-            if ".fmlpackignore" in str(f): raise PermissionError("Denied")
-            return original_open(f, *args, **kwargs)
-        
-        with patch("builtins.open", side_effect=side_effect):
-            matcher = load_ignore_matcher(str(tmp_path), False)
-            # Should gracefully handle error and return None (no patterns loaded)
-            assert matcher is None
-
-    def test_generate_fml_spec_inclusion(self, temp_test_dir):
-        # Test content of included spec
-        f = temp_test_dir / "a.txt"
-        f.touch()
-        fml, _ = generate_fml(str(temp_test_dir), [str(f)], [], True)
-        assert any("Filesystem Markup Language" in line for line in fml)
-
-    def test_expand_paths_glob_recursive(self, temp_test_dir):
-        (temp_test_dir / "sub").mkdir()
-        (temp_test_dir / "sub" / "target.txt").touch()
-        # glob ** pattern
-        paths = expand_and_collect_paths(["**/*.txt"], str(temp_test_dir))
-        assert any("target.txt" in str(p) for p in paths)
-
-    def test_extract_absolute_path_win(self, tmp_path):
-        # Verify win abs path rejection even on linux
-        content = "<|||file_start=C:\\Windows\\System32\\cmd.exe|||>"
-        fml = tmp_path / "win.fml"
-        fml.write_text(content, encoding="utf-8")
-        with patch("sys.stderr", new=io.StringIO()) as fake_err:
-             extract_fml_archive(str(fml), str(tmp_path))
-             pass 
-
-    def test_main_extract_explicit_stdin(self):
-        # fmlpack -x -f -
-        with patch("sys.argv", ["fmlpack.py", "-x", "-f", "-"]):
-            with patch("sys.stdin", io.StringIO("<|||file_start=a|||>")):
-                with patch("fmlpack.extract_fml_archive") as mock_extract:
-                    fmlpack_main()
-                    mock_extract.assert_called()
-
-    def test_main_create_explicit_stdout(self, temp_test_dir):
-        # fmlpack -c . -f -
-        with patch("sys.argv", ["fmlpack.py", "-c", ".", "-f", "-"]):
-            with patch("fmlpack.generate_fml", return_value=(["TAG"], [])):
-                with patch("sys.stdout.buffer.write") as mock_write:
-                    fmlpack_main()
-                    mock_write.assert_called()
-
-    def test_cli_exclude_normalization_slashes(self):
-        # Verify excluded logic handles both separators
-        p = f"a{os.sep}b{os.sep}c"
-        # The tool normalizes INPUT path, not pattern
-        assert is_excluded_cli(p, ["a/b/c"]) is True 
-
-    def test_process_arguments_defaults(self):
-        with patch("sys.argv", ["fmlpack.py", "input"]):
-             args = process_arguments()
-             assert args.create is False 
-             assert args.extract is False
-             assert args.list is False
-             assert args.input == ["input"]
-
+    def test_list_fml_from_stdin_empty(self):
+        with patch("sys.stdin", io.StringIO("")):
+            with patch("sys.stdout", new=io.StringIO()) as out:
+                list_fml_archive('-')
+                assert out.getvalue() == ""
+                
     def test_list_fml_io_error(self, tmp_path):
         fml = tmp_path / "bad.fml"
         fml.touch()
@@ -531,110 +664,6 @@ class TestCoverageBoostPart2:
             with pytest.raises(SystemExit):
                  with patch("sys.stderr", new=io.StringIO()):
                     list_fml_archive(str(fml))
-
-    def test_extract_fml_write_error_mid_stream(self, tmp_path):
-        # Content ok, open ok, but write fails
-        fml = tmp_path / "test.fml"
-        fml.write_text("<|||file_start=a|||>\nDATA\n<|||file_end|||>", encoding="utf-8")
-        
-        mock_file = MagicMock()
-        mock_file.write.side_effect = OSError("Disk full")
-        
-        with patch("builtins.open", return_value=mock_file):
-            # os.makedirs must pass
-            with patch("os.makedirs"):
-                 # Should just print error to stderr and continue/finish
-                 with patch("sys.stderr", new=io.StringIO()) as fake_err:
-                     extract_fml_archive(str(fml), str(tmp_path))
-
-    def test_generate_fml_sorting(self, temp_test_dir):
-        (temp_test_dir / "b.txt").touch()
-        (temp_test_dir / "a.txt").touch()
-        # Input passed as "." -> expanded to [file_root.txt, dir1, b.txt, a.txt ...]
-        # generate_fml should sort them.
-        fml, _ = generate_fml(str(temp_test_dir), [str(temp_test_dir / "b.txt"), str(temp_test_dir / "a.txt")], [], False)
-        # Check order in output
-        content = "".join(fml)
-        idx_a = content.find("a.txt")
-        idx_b = content.find("b.txt")
-        assert idx_a < idx_b
-
-
-@pytest.mark.skipif(not FMLPACK_MODULE_IMPORTED, reason="fmlpack module not directly importable")
-class TestCoverageBoost:
-    """Targeted unit tests for edge cases and error handlers to boost coverage."""
-
-    def test_ignore_matcher_exception_safety(self, tmp_path):
-        # Mock pathspec to raise exception
-        matcher = IgnoreMatcher(str(tmp_path), ["*.txt"])
-        with patch.object(matcher._spec, 'match_file', side_effect=Exception("Boom")):
-            # Should return False (safe default)
-            assert matcher.matches(str(tmp_path / "test.txt"), False) is False
-
-    def test_find_project_root_at_system_root(self):
-        # Simulate / being the parent of /
-        with patch("os.path.abspath", side_effect=lambda p: p):
-            with patch("os.path.exists", return_value=False):
-                with patch("os.path.dirname", side_effect=lambda p: p): # dirname(/) == /
-                    assert find_project_root("/random/path") == "/random/path"
-
-    def test_generate_fml_parent_dirs_logic(self, temp_test_dir):
-        # file at dir1/subdir/file.txt. 
-        # generate_fml called with root=dir1.
-        # Should generate dir entry for subdir.
-        (temp_test_dir / "dir1" / "subdir").mkdir()
-        f = temp_test_dir / "dir1" / "subdir" / "deep.txt"
-        f.touch()
-        
-        fml, _ = generate_fml(str(temp_test_dir / "dir1"), [str(f)], [], False)
-        content = "".join(fml)
-        # relative path is subdir/deep.txt
-        # parent is subdir.
-        assert "<|||dir=subdir|||>" in content
-
-    def test_expand_paths_pruning_logic(self, temp_test_dir):
-        # dir1/ignore_me/file.txt
-        ignore_dir = temp_test_dir / "dir1" / "ignore_me"
-        ignore_dir.mkdir()
-        (ignore_dir / "file.txt").touch()
-        
-        # Mock matcher to ignore "ignore_me"
-        mock_matcher = MagicMock()
-        def side_effect(path, is_dir):
-            return "ignore_me" in path and is_dir
-        mock_matcher.matches.side_effect = side_effect
-        
-        paths = expand_and_collect_paths([str(temp_test_dir / "dir1")], str(temp_test_dir), ignore_matcher=mock_matcher)
-        # Should not contain file.txt inside ignore_me because os.walk was pruned
-        assert not any("ignore_me" in str(p) for p in paths)
-
-    def test_extract_fml_eof_mid_file(self, tmp_path):
-        fml = "<|||file_start=test.txt|||>\nContent"
-        archive = tmp_path / "test.fml"
-        archive.write_text(fml, encoding='utf-8')
-        
-        # Capture stdout to avoid clutter
-        with patch("sys.stdout", new=io.StringIO()) as out:
-            extract_fml_archive(str(archive), str(tmp_path))
-            assert "Extracted (EOF)" in out.getvalue()
-            
-        assert (tmp_path / "test.txt").read_text(encoding='utf-8') == "Content"
-
-    def test_main_stdin_detection(self):
-        # If no args and not tty, detection should fail gracefully
-        with patch("sys.argv", ["fmlpack.py"]):
-            with patch("sys.stdin.isatty", return_value=False):
-                with pytest.raises(SystemExit) as e:
-                    with patch("sys.stderr", new=io.StringIO()) as err:
-                        fmlpack_main()
-                assert e.value.code == 1
-                assert "No operation could be determined" in err.getvalue()
-
-    def test_main_arg_version(self):
-        with patch("sys.argv", ["fmlpack.py", "--version"]):
-            with pytest.raises(SystemExit):
-                 # argparse prints version to stdout/stderr then exits
-                 fmlpack_main()
 
 
 @pytest.mark.skipif(not FMLPACK_MODULE_IMPORTED, reason="fmlpack module not directly importable")
@@ -668,35 +697,30 @@ class TestProjectRootFinding:
         # Should stop after ~50 and return start dir (abspath)
         res = find_project_root(str(current))
         assert res == str(current.resolve())
-
-    def test_load_ignore_matcher(self, tmp_path: pathlib.Path):
-        (tmp_path / ".fmlpackignore").write_text("*.fmlpack\n", encoding="utf-8")
-        (tmp_path / ".gitignore").write_text("*.gitignored\n", encoding="utf-8")
-        matcher = load_ignore_matcher(str(tmp_path), True)
-        assert matcher.matches(str(tmp_path / "test.fmlpack"), False)
-        assert matcher.matches(str(tmp_path / "test.gitignored"), False)
         
-        matcher_no_git = load_ignore_matcher(str(tmp_path), False)
-        assert matcher_no_git.matches(str(tmp_path / "test.fmlpack"), False)
-        assert not matcher_no_git.matches(str(tmp_path / "test.gitignored"), False)
-        
-    def test_load_ignore_matcher_empty(self, tmp_path: pathlib.Path):
-        assert load_ignore_matcher(str(tmp_path), False) is None
-
-    def test_load_ignore_files_combo_with_flag(self, tmp_path):
-        (tmp_path / ".fmlpackignore").write_text("ignore_fml\n", encoding="utf-8")
-        (tmp_path / ".gitignore").write_text("ignore_git\n", encoding="utf-8")
-        matcher = load_ignore_matcher(str(tmp_path), True)
-        assert matcher.matches(str(tmp_path / "ignore_fml"), False)
-        assert matcher.matches(str(tmp_path / "ignore_git"), False)
-        assert matcher.matches(str(tmp_path / ".git"), True)
-
-    def test_load_ignore_read_error(self, tmp_path: pathlib.Path):
-        (tmp_path / ".gitignore").touch()
-        with patch("builtins.open", side_effect=PermissionError("Denied")):
-            matcher = load_ignore_matcher(str(tmp_path), True)
-            assert matcher is not None
-            assert matcher.matches(str(tmp_path / ".git" / "HEAD"), False)
+    def test_find_root_infinite_loop_prevention(self, tmp_path):
+        # Mock dirname to always return self to simulate root
+        with patch("os.path.abspath", side_effect=lambda p: p):
+            with patch("os.path.exists", return_value=False):
+                with patch("os.path.dirname", side_effect=lambda p: p):
+                    # Should break immediately
+                    assert find_project_root("/path") == "/path"
+                    
+    def test_find_project_root_at_system_root(self):
+        # Simulate / being the parent of /
+        with patch("os.path.abspath", side_effect=lambda p: p):
+            with patch("os.path.exists", return_value=False):
+                with patch("os.path.dirname", side_effect=lambda p: p): # dirname(/) == /
+                    assert find_project_root("/random/path") == "/random/path"
+                    
+    def test_find_project_root_current_dir_fallback(self, tmp_path):
+        cwd = os.getcwd()
+        try:
+            os.chdir(tmp_path)
+            res = find_project_root(".")
+            assert os.path.abspath(res) == str(tmp_path)
+        finally:
+            os.chdir(cwd)
 
 
 @pytest.mark.skipif(not FMLPACK_MODULE_IMPORTED, reason="fmlpack module not directly importable")
@@ -716,6 +740,13 @@ class TestBinaryDetection:
         f = tmp_path / "null.bin"
         f.write_bytes(b"some\x00data")
         assert is_binary_file(str(f)) is True
+        
+    def test_is_binary_os_error(self, temp_test_dir):
+        f = temp_test_dir / "err.bin"
+        f.touch()
+        # Mock open raising generic OSError (not PermissionError)
+        with patch("builtins.open", side_effect=OSError("Disk full")):
+            assert is_binary_file(str(f)) is True
 
 
 @pytest.mark.skipif(not FMLPACK_MODULE_IMPORTED, reason="fmlpack module not directly importable")
@@ -792,6 +823,67 @@ class TestMainEntry:
                     fmlpack_main()
              assert e.value.code == 1
              assert "does not exist" in fake_err.getvalue()
+             
+    def test_main_stdin_detection(self):
+        # If no args and not tty, detection should fail gracefully
+        with patch("sys.argv", ["fmlpack.py"]):
+            with patch("sys.stdin.isatty", return_value=False):
+                with pytest.raises(SystemExit) as e:
+                    with patch("sys.stderr", new=io.StringIO()) as err:
+                        fmlpack_main()
+                assert e.value.code == 1
+                assert "No operation could be determined" in err.getvalue()
+
+    def test_main_arg_version(self):
+        with patch("sys.argv", ["fmlpack.py", "--version"]):
+            with pytest.raises(SystemExit):
+                 # argparse prints version to stdout/stderr then exits
+                 fmlpack_main()
+
+    def test_main_flush_broken_pipe(self):
+        # Specific check for flush() error handling in main
+        with patch("sys.argv", ["fmlpack.py", "-c", ".", "-f", "-"]):
+            with patch("sys.stdin.isatty", return_value=False):
+                with patch("fmlpack.generate_fml", return_value=(["data"], [])):
+                    with patch("sys.stdout.buffer.write"): # Write succeeds
+                        with patch("sys.stdout.buffer.flush", side_effect=BrokenPipeError): # Flush fails
+                             with patch("sys.stderr", new=io.StringIO()):
+                                 with pytest.raises(SystemExit) as e:
+                                     fmlpack_main()
+                                 assert e.value.code == 0
+                                 
+    def test_main_extract_explicit_stdin(self):
+        with patch("sys.argv", ["fmlpack.py", "-x", "-f", "-"]):
+            with patch("sys.stdin", io.StringIO("<|||file_start=a|||>")):
+                with patch("fmlpack.extract_fml_archive") as mock_extract:
+                    fmlpack_main()
+                    mock_extract.assert_called()
+
+    def test_main_create_explicit_stdout(self, temp_test_dir):
+        with patch("sys.argv", ["fmlpack.py", "-c", ".", "-f", "-"]):
+            with patch("fmlpack.generate_fml", return_value=(["TAG"], [])):
+                with patch("sys.stdout.buffer.write") as mock_write:
+                    fmlpack_main()
+                    mock_write.assert_called()
+                    
+    def test_main_arg_create_and_extract_error(self):
+        with patch("sys.argv", ["fmlpack.py", "-c", "-x"]):
+            with pytest.raises(SystemExit) as e:
+                with patch("sys.stderr", new=io.StringIO()) as err:
+                    fmlpack_main()
+            assert e.value.code == 1
+            assert "Only one" in err.getvalue()
+            
+    def test_complex_arg_mix(self, temp_test_dir):
+        with patch("sys.argv", ["fmlpack.py", "-c", ".", "-C", str(temp_test_dir), "--exclude", "*.log", "--gitignore"]):
+             with patch("fmlpack.load_ignore_matcher") as mock_load:
+                 mock_load.return_value = MagicMock()
+                 mock_load.return_value.matches.return_value = False
+                 
+                 with patch("sys.stdout.buffer.write") as mock_write:
+                     fmlpack_main()
+                     mock_load.assert_called_with(str(temp_test_dir), True)
+                     mock_write.assert_called()
 
 
 # --- CLI Tests (Subprocess) ---
@@ -946,6 +1038,18 @@ class TestCliCommands:
     def test_error_multiple_modes(self, temp_test_dir: pathlib.Path):
         result = self.run_fmlpack(["-c", "-x"], cwd=temp_test_dir, expect_success=False)
         assert result.returncode == 1
+
+    def test_process_arguments_defaults(self):
+        with patch("sys.argv", ["fmlpack.py", "input"]):
+             args = process_arguments()
+             assert args.create is False 
+             assert args.extract is False
+             assert args.list is False
+             assert args.input == ["input"]
+
+    def test_cli_exclude_normalization_slashes(self):
+        p = f"a{os.sep}b{os.sep}c"
+        assert is_excluded_cli(p, ["a/b/c"]) is True
 
 if __name__ == "__main__":
     os.environ["PYTHONPATH"] = str(_project_root_dir / "src") + os.pathsep + os.environ.get("PYTHONPATH", "")

@@ -280,10 +280,11 @@ def generate_fml(root_dir, files_and_folders, exclude_patterns, include_spec, ig
         fml_content.append(get_fml_spec())
         fml_content.append("<|||file_end|||>\n")
 
-    sorted_items = sorted(files_and_folders) # Process in a consistent order
+    # FIX: Deduplicate inputs before processing
+    unique_items = set(os.path.abspath(p) for p in files_and_folders)
+    sorted_items = sorted(unique_items) 
 
-    for item_path_orig in sorted_items: # item_path_orig is an absolute path
-        item_path_abs = os.path.abspath(item_path_orig) 
+    for item_path_abs in sorted_items: 
         relative_path = get_relative_path(root_dir_abs, item_path_abs)
 
         # Create parent directory entries if not already processed
