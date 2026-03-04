@@ -592,6 +592,60 @@ class TestFmlLogic:
         extract_fml_archive(str(fml_path), str(tmp_path))
         assert (tmp_path / name).exists()
 
+    def test_roundtrip_unicode_content(self, tmp_path):
+        """Pack and unpack a file with rich Unicode: box-drawing, arrows, emojis, em-dash, ellipsis."""
+        src = tmp_path / "src"
+        src.mkdir()
+        unicode_text = (
+            "# Unicode Test\n"
+            "─────────────\n"
+            "→ arrows ↔ bidirectional\n"
+            "📐 protractor 👀 eyes 📋 clipboard\n"
+            "⚠ warning ✓ check ✕ cross\n"
+            "— em-dash … ellipsis\n"
+            "Привет, мир! 你好世界\n"
+        )
+        (src / "unicode.txt").write_text(unicode_text, encoding="utf-8")
+        fml_lines, errors = generate_fml(str(src), [str(src / "unicode.txt")], None, False)
+        assert not errors
+
+        fml_path = tmp_path / "archive.fml"
+        fml_path.write_text("".join(fml_lines), encoding="utf-8")
+
+        out = tmp_path / "out"
+        extract_fml_archive(str(fml_path), str(out))
+        result = (out / "unicode.txt").read_text(encoding="utf-8")
+        assert result == unicode_text
+
+    def test_extract_file_end_inline(self, tmp_path):
+        """file_end tag glued to end of content line (LLM sometimes omits the newline)."""
+        fml = "<|||file_start=hello.txt|||>\nline1\nline2<|||file_end|||>\n"
+        fml_path = tmp_path / "inline.fml"
+        fml_path.write_text(fml, encoding="utf-8")
+        extract_fml_archive(str(fml_path), str(tmp_path))
+        result = (tmp_path / "hello.txt").read_text(encoding="utf-8")
+        assert result == "line1\nline2\n"
+
+    def test_extract_file_end_inline_multiple_files(self, tmp_path):
+        """Inline file_end must correctly close one file and allow the next to open."""
+        fml = (
+            "<|||file_start=a.txt|||>\nAAA<|||file_end|||>\n"
+            "<|||file_start=b.txt|||>\nBBB\n<|||file_end|||>\n"
+        )
+        fml_path = tmp_path / "multi.fml"
+        fml_path.write_text(fml, encoding="utf-8")
+        extract_fml_archive(str(fml_path), str(tmp_path))
+        assert (tmp_path / "a.txt").read_text(encoding="utf-8") == "AAA\n"
+        assert (tmp_path / "b.txt").read_text(encoding="utf-8") == "BBB\n"
+
+    def test_extract_file_end_inline_empty_prefix(self, tmp_path):
+        """Inline file_end with no preceding content on the same line (normal case)."""
+        fml = "<|||file_start=c.txt|||>\ndata\n<|||file_end|||>\n"
+        fml_path = tmp_path / "normal.fml"
+        fml_path.write_text(fml, encoding="utf-8")
+        extract_fml_archive(str(fml_path), str(tmp_path))
+        assert (tmp_path / "c.txt").read_text(encoding="utf-8") == "data\n"
+
     def test_extract_fml_write_error_mid_stream(self, tmp_path):
         fml = tmp_path / "test.fml"
         fml.write_text("<|||file_start=a|||>\nDATA\n<|||file_end|||>", encoding="utf-8")
@@ -747,6 +801,22 @@ class TestBinaryDetection:
         # Mock open raising generic OSError (not PermissionError)
         with patch("builtins.open", side_effect=OSError("Disk full")):
             assert is_binary_file(str(f)) is True
+
+    def test_utf8_multibyte_not_binary(self, tmp_path: pathlib.Path):
+        """Files with multi-byte UTF-8 chars (box-drawing, arrows, emojis) are NOT binary."""
+        unicode_content = "Header\n─────────\n→ item1\n↔ item2\n📐 angle\n👀 look\n📋 list\n⚠ warn\n✓ ok\n✕ fail\n— dash\n… ellipsis\n"
+        f = tmp_path / "unicode.txt"
+        f.write_text(unicode_content, encoding="utf-8")
+        assert is_binary_file(str(f)) is False
+
+    def test_utf8_multibyte_at_chunk_boundary(self, tmp_path: pathlib.Path):
+        """A multi-byte char split at the 1024-byte read boundary must not be flagged as binary."""
+        # Place a 4-byte emoji right at the 1024 boundary so it gets truncated
+        padding = "A" * 1022  # 1022 ASCII bytes
+        content = padding + "\U0001F680"  # rocket emoji = 4 UTF-8 bytes, starts at byte 1022
+        f = tmp_path / "boundary.txt"
+        f.write_text(content, encoding="utf-8")
+        assert is_binary_file(str(f)) is False
 
 
 @pytest.mark.skipif(not FMLPACK_MODULE_IMPORTED, reason="fmlpack module not directly importable")

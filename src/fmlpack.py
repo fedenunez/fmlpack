@@ -12,7 +12,7 @@ import sys
 import glob
 import pathspec 
 
-__version__ = "0.2.2"
+__version__ = "0.3.0"
 
 def get_fml_spec():
     return """
@@ -132,17 +132,24 @@ def is_binary_file(file_path):
     """
     try:
         with open(file_path, "rb") as f:
-            # Check for null bytes
             content = f.read(1024)
             if b"\x00" in content:
                 return True
-            # Check for non-UTF-8 characters
+            # Decode UTF-8. Reading a fixed byte count can truncate a
+            # multi-byte character at the boundary, so only treat it as
+            # binary if the error is NOT in the last 3 bytes (max
+            # continuation bytes in a single UTF-8 sequence).
             try:
                 content.decode('utf-8')
-            except UnicodeDecodeError:
-                return True
+            except UnicodeDecodeError as e:
+                # Only tolerate errors in the last 3 bytes when we read
+                # a full chunk (truncated multi-byte char at boundary).
+                # Short files that fit entirely have no truncation.
+                if len(content) < 1024 or e.start < len(content) - 3:
+                    return True
+                # Error is in the trailing bytes of a full chunk — likely
+                # a truncated multi-byte char, not a truly binary file.
     except Exception: # pylint: disable=broad-except
-        # If we can't read it for any reason, treat as binary to be safe
         return True
     return False
 
@@ -511,8 +518,13 @@ def extract_fml_archive(archive_file_path, target_dir_path, additional_files=Non
                     print(f"Error creating file {full_path}: {e}", file=sys.stderr)
                     current_file_handle = None
 
-            elif line == "<|||file_end|||>": 
+            elif line == "<|||file_end|||>" or line.endswith("<|||file_end|||>"):
                 if current_file_handle:
+                    # If the tag is glued to the end of a content line,
+                    # keep the text before it as file content.
+                    if line != "<|||file_end|||>":
+                        prefix = line[:-len("<|||file_end|||>")]
+                        file_content_buffer.append(prefix + "\n")
                     current_file_handle.write("".join(file_content_buffer))
                     file_content_buffer = []
                     current_file_handle.close()
@@ -524,8 +536,8 @@ def extract_fml_archive(archive_file_path, target_dir_path, additional_files=Non
                     print(f"Warning: Encountered <|||file_end|||> without an active file context near line {line_num}.", file=sys.stderr)
 
 
-            elif line.startswith("<|||dir="): 
-                if current_file_handle: 
+            elif line.startswith("<|||dir="):
+                if current_file_handle:
                     file_content_buffer.append(line_raw)
                 else:
                     dir_path_str = line[DIRSL:-DIREL]

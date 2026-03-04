@@ -2,7 +2,7 @@ from setuptools import setup
 
 setup(
     name='fmlpack',
-    version='0.2.2',
+    version='0.3.0',
     py_modules=['fmlpack'],
     package_dir={'': 'src'},
     entry_points={
