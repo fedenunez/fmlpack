@@ -13,7 +13,7 @@ import glob
 import pathspec
 from collections import deque
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 # Named constants (CCR-20260304-011)
 _MAX_UPWARD_SEARCH = 50          # max directory levels to search for project root
