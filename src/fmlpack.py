@@ -1,7 +1,7 @@
 #!/bin/python3
 """
 Created on Fri Oct 27 13:36:28 2023
-@author: fedenunez and tulp
+@author: fedenunez
 """
 
 import argparse
@@ -10,9 +10,21 @@ import fnmatch
 import pathlib
 import sys
 import glob
-import pathspec 
+import pathspec
+from collections import deque
 
 __version__ = "0.3.0"
+
+# Named constants (CCR-20260304-011)
+_MAX_UPWARD_SEARCH = 50          # max directory levels to search for project root
+_BINARY_READ_CHUNK = 1024        # bytes read for binary detection
+_UTF8_MAX_CONTINUATION_BYTES = 3 # max trailing bytes that may be a truncated UTF-8 char
+
+# FML tag length constants (CCR-20260304-012)
+_FILE_START_PREFIX_LEN = len("<|||file_start=")
+_TAG_SUFFIX_LEN = len("|||>")
+_DIR_PREFIX_LEN = len("<|||dir=")
+
 
 def get_fml_spec():
     return """
@@ -60,7 +72,7 @@ The Filesystem Markup Language (FML) is a simple format to represent a file syst
 
     <|||file_start=projects/plan.txt|||>
     Project plan details go here.
-    <|||file_end|||>`
+    <|||file_end|||>
     ```
 
 This example creates a directory `projects` and a file `plan.txt` within it, containing the specified text.
@@ -132,20 +144,19 @@ def is_binary_file(file_path):
     """
     try:
         with open(file_path, "rb") as f:
-            content = f.read(1024)
+            content = f.read(_BINARY_READ_CHUNK)
             if b"\x00" in content:
                 return True
             # Decode UTF-8. Reading a fixed byte count can truncate a
             # multi-byte character at the boundary, so only treat it as
-            # binary if the error is NOT in the last 3 bytes (max
-            # continuation bytes in a single UTF-8 sequence).
+            # binary if the error is NOT in the last few bytes.
             try:
                 content.decode('utf-8')
             except UnicodeDecodeError as e:
-                # Only tolerate errors in the last 3 bytes when we read
+                # Only tolerate errors in the last bytes when we read
                 # a full chunk (truncated multi-byte char at boundary).
                 # Short files that fit entirely have no truncation.
-                if len(content) < 1024 or e.start < len(content) - 3:
+                if len(content) < _BINARY_READ_CHUNK or e.start < len(content) - _UTF8_MAX_CONTINUATION_BYTES:
                     return True
                 # Error is in the trailing bytes of a full chunk — likely
                 # a truncated multi-byte char, not a truly binary file.
@@ -180,7 +191,7 @@ class IgnoreMatcher:
         if not abs_path.startswith(self.ignore_root):
             # Path is outside the ignore root scope; defaults to not ignored by this matcher.
             return False
-        
+
         # Get path relative to the ignore root (where .gitignore resides)
         relpath = os.path.relpath(abs_path, self.ignore_root)
         if relpath == '.':
@@ -193,7 +204,7 @@ class IgnoreMatcher:
         # or we rely on match_file vs match_tree behavior.
         # Ensure we pass the trailing slash if it is a directory to match 'dir/' patterns correctly.
         candidate = rel_posix + "/" if is_dir else rel_posix
-        
+
         try:
             return self._spec.match_file(candidate)
         except Exception: # pylint: disable=broad-except
@@ -206,24 +217,23 @@ def find_project_root(start_dir):
     Returns the absolute path of the directory found, or start_dir if none found.
     """
     current = os.path.abspath(start_dir)
-    # limit depth to avoid infinite loops in weird FS structures
-    for _ in range(50): 
+    for _ in range(_MAX_UPWARD_SEARCH):
         if os.path.exists(os.path.join(current, ".git")) or \
            os.path.exists(os.path.join(current, ".fmlpackignore")) or \
            os.path.exists(os.path.join(current, ".gitignore")):
             return current
-        
+
         parent = os.path.dirname(current)
         if parent == current: # Reached root
             break
         current = parent
-    
+
     return os.path.abspath(start_dir)
 
 
 def load_ignore_matcher(start_dir, use_gitignore_flag):
     """
-    Load .fmlpackignore and optional .gitignore. 
+    Load .fmlpackignore and optional .gitignore.
     Searches upwards from start_dir to find the 'project root'.
     """
     project_root = find_project_root(start_dir)
@@ -245,7 +255,7 @@ def load_ignore_matcher(start_dir, use_gitignore_flag):
                     patterns.extend(f.read().splitlines())
             except Exception:  # pylint: disable=broad-except
                 pass
-        
+
         # Explicitly ignore .git/ when using gitignore flag
         patterns.append(".git/")
 
@@ -264,18 +274,25 @@ def should_exclude(abs_path, rel_path_archive, is_dir, exclude_patterns, ignore_
     # CLI excludes usually match against the path visible in the archive
     if is_excluded_cli(rel_path_archive, exclude_patterns):
         return True
-    
+
     # Ignore matcher works on filesystem structure (absolute paths -> relative to git root)
     if ignore_matcher and ignore_matcher.matches(abs_path, is_dir):
         return True
-        
+
     return False
 
 
 def generate_fml(root_dir, files_and_folders, exclude_patterns, include_spec, ignore_matcher=None):
-    """Generate the FML content for the given files and folders."""
+    """Generate the FML content for the given files and folders.
+
+    Returns (fml_content, skipped, errors):
+      fml_content: list of FML output lines
+      skipped:     informational messages (e.g. binary files ignored)
+      errors:      actual failures (unreadable files, missing paths, etc.)
+    """
     fml_content = []
-    errors = [] # Store errors encountered during processing
+    skipped = []  # Informational: binary files and other non-error skips
+    errors = []   # Actual failures: unreadable, missing, etc.
 
     # Ensure root_dir is an absolute path for correct relative path calculation
     root_dir_abs = os.path.abspath(root_dir)
@@ -287,30 +304,30 @@ def generate_fml(root_dir, files_and_folders, exclude_patterns, include_spec, ig
         fml_content.append(get_fml_spec())
         fml_content.append("<|||file_end|||>\n")
 
-    # FIX: Deduplicate inputs before processing
+    # Deduplicate inputs before processing
     unique_items = set(os.path.abspath(p) for p in files_and_folders)
-    sorted_items = sorted(unique_items) 
+    sorted_items = sorted(unique_items)
 
-    for item_path_abs in sorted_items: 
+    for item_path_abs in sorted_items:
         relative_path = get_relative_path(root_dir_abs, item_path_abs)
 
         # Create parent directory entries if not already processed
         parent_dir = os.path.dirname(relative_path)
         current_parent_parts = []
-        if parent_dir and parent_dir != '.': 
+        if parent_dir and parent_dir != '.':
             parts = pathlib.Path(parent_dir).parts
             for part in parts:
                 current_parent_parts.append(part)
                 dir_to_check_rel = os.path.join(*current_parent_parts)
                 dir_to_check_abs = os.path.join(root_dir_abs, dir_to_check_rel)
-                
+
                 if dir_to_check_rel not in processed_dirs:
                     if not should_exclude(dir_to_check_abs, dir_to_check_rel, True, exclude_patterns, ignore_matcher):
                         # Ensure POSIX style output
                         fml_content.append(f"<|||dir={to_posix_path(dir_to_check_rel)}|||>\n")
                         processed_dirs.add(dir_to_check_rel)
                     else:
-                        processed_dirs.add(dir_to_check_rel) # Mark as processed so we don't check again, even if excluded
+                        processed_dirs.add(dir_to_check_rel) # Mark as processed even if excluded
 
         if os.path.isdir(item_path_abs):
             if relative_path not in processed_dirs:
@@ -320,48 +337,47 @@ def generate_fml(root_dir, files_and_folders, exclude_patterns, include_spec, ig
                     processed_dirs.add(relative_path)
 
         elif os.path.isfile(item_path_abs):
-            if should_exclude(item_path_abs, relative_path, False, exclude_patterns, ignore_matcher):
-                # Silent exclusion is preferred for ignore files.
-                pass 
-            elif is_binary_file(item_path_abs):
-                errors.append(f"Ignoring binary file: {to_posix_path(relative_path)}")
-            else:
-                fml_content.append(f"<|||file_start={to_posix_path(relative_path)}|||>\n")
-                try:
-                    with open(item_path_abs, "r", encoding="utf-8") as f:
-                        content=f.read()
-                        if content and not content.endswith('\n'):
-                            content += '\n'
+            if not should_exclude(item_path_abs, relative_path, False, exclude_patterns, ignore_matcher):
+                if is_binary_file(item_path_abs):
+                    skipped.append(f"Ignoring binary file: {to_posix_path(relative_path)}")
+                else:
+                    # Read first; only append tags if read succeeds (CCR-20260304-001)
+                    try:
+                        with open(item_path_abs, "r", encoding="utf-8") as f:
+                            content = f.read()
+                            if content and not content.endswith('\n'):
+                                content += '\n'
+                        fml_content.append(f"<|||file_start={to_posix_path(relative_path)}|||>\n")
                         fml_content.append(content)
-                except UnicodeDecodeError as e:
-                    errors.append(f"Error reading file {to_posix_path(relative_path)}: {e}")
-                except Exception as e: # pylint: disable=broad-except
-                    errors.append(f"Could not process file {to_posix_path(relative_path)}: {e}")
-                fml_content.append("<|||file_end|||>\n")
+                        fml_content.append("<|||file_end|||>\n")
+                    except UnicodeDecodeError as e:
+                        errors.append(f"Error reading file {to_posix_path(relative_path)}: {e}")
+                    except Exception as e: # pylint: disable=broad-except
+                        errors.append(f"Could not process file {to_posix_path(relative_path)}: {e}")
+
         elif not os.path.exists(item_path_abs):
              offending_item_display_path = get_relative_path(root_dir_abs, item_path_abs)
              errors.append(f"Input item not found: {offending_item_display_path} (resolved to {item_path_abs})")
 
-
-    return fml_content, errors
+    return fml_content, skipped, errors
 
 def get_common_base_dir(paths, current_working_dir=None):
     """
     Find the shallowest common parent directory for a list of absolute paths.
-    
+
     If current_working_dir is provided, ensures that if a path matches it,
     it is not treated as a child of its parent (i.e. '.' stays '.').
     """
     if not paths:
         return os.getcwd()
-    
+
     if current_working_dir is None:
         current_working_dir = os.getcwd()
 
     processed_paths = []
     for p_str in paths:
-        abs_p = os.path.abspath(p_str) 
-        if os.path.isfile(abs_p): 
+        abs_p = os.path.abspath(p_str)
+        if os.path.isfile(abs_p):
             processed_paths.append(os.path.dirname(abs_p))
         elif os.path.isdir(abs_p):
             # Use parent of directory to ensure directory name is preserved in archive
@@ -384,10 +400,10 @@ def expand_and_collect_paths(input_patterns, reference_dir_for_relative_patterns
     Expands glob patterns and collects all specified files and directories.
     Applies ignore_matcher during the walk to prevent recursing into ignored directories.
     """
-    initial_collected_paths = set() 
+    initial_collected_paths = set()
 
     for pattern_orig in input_patterns:
-        current_pattern_to_process = str(pattern_orig) 
+        current_pattern_to_process = str(pattern_orig)
 
         # Handle "." case directly
         if current_pattern_to_process == ".":
@@ -409,15 +425,15 @@ def expand_and_collect_paths(input_patterns, reference_dir_for_relative_patterns
             initial_collected_paths.add(abs_path)
         else:
             for p_str in matched_by_glob_module:
-                initial_collected_paths.add(os.path.abspath(p_str)) 
+                initial_collected_paths.add(os.path.abspath(p_str))
 
     final_collected_paths = set()
-    queue = list(initial_collected_paths)
+    queue = deque(initial_collected_paths)  # O(1) popleft instead of O(n) pop(0)
     processed_for_walk = set()
 
     while queue:
-        path_str_abs = queue.pop(0)
-        
+        path_str_abs = queue.popleft()
+
         final_collected_paths.add(path_str_abs)
 
         path_obj = pathlib.Path(path_str_abs)
@@ -427,24 +443,24 @@ def expand_and_collect_paths(input_patterns, reference_dir_for_relative_patterns
                 try:
                     for root, dirs, files in os.walk(path_str_abs):
                         current_root_abs = os.path.abspath(root)
-                        
+
                         # Prune ignored directories in-place
                         if ignore_matcher:
                             dirs[:] = [d for d in dirs if not ignore_matcher.matches(os.path.join(current_root_abs, d), True)]
-                        
+
                         # Add current dir (if not root of walk which is already added)
                         if current_root_abs != path_str_abs:
                              final_collected_paths.add(current_root_abs)
 
                         for d_name in dirs:
                             final_collected_paths.add(os.path.abspath(os.path.join(current_root_abs, d_name)))
-                        
+
                         for f_name in files:
                             f_abs = os.path.abspath(os.path.join(current_root_abs, f_name))
                             if ignore_matcher and ignore_matcher.matches(f_abs, False):
                                 continue
                             final_collected_paths.add(f_abs)
-                            
+
                 except OSError as e:
                     print(f"Warning: Could not walk directory {path_str_abs}: {e}", file=sys.stderr)
 
@@ -454,16 +470,43 @@ def expand_and_collect_paths(input_patterns, reference_dir_for_relative_patterns
 def is_safe_path(target_root, path_to_join):
     """
     Ensures that joining path_to_join to target_root does not escape target_root.
+    Also rejects Windows-style absolute paths (e.g. C:\\...) on all platforms.
     """
+    # Windows drive letter: reject regardless of platform
+    if len(path_to_join) >= 2 and path_to_join[1] == ':':
+        return False
     target_root_abs = os.path.abspath(target_root)
     joined_path = os.path.abspath(os.path.join(target_root_abs, path_to_join))
     return os.path.commonpath([target_root_abs, joined_path]) == target_root_abs
 
 
-FSL = len("<|||file_start=")
-FEL = len("|||>")
-DIRSL = len("<|||dir=")
-DIREL = len("|||>")
+def _open_archive(archive_file_path):
+    """Open an archive file for reading, or return sys.stdin for '-'. Exits on error."""
+    if archive_file_path == '-':
+        return sys.stdin
+    try:
+        return open(archive_file_path, "r", encoding="utf-8")
+    except FileNotFoundError:
+        print(f"Error: Archive file not found: {archive_file_path}", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"Error opening archive file {archive_file_path}: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def _write_and_close_file(handle, buffer, path_str, eof=False):
+    """Write buffered content to handle and close it. Returns True on success."""
+    try:
+        handle.write("".join(buffer))
+    except OSError as e:
+        print(f"Error writing file {path_str}: {e}", file=sys.stderr)
+        handle.close()
+        return False
+    handle.close()
+    suffix = " (EOF)" if eof else ""
+    print(f"Extracted{suffix}: {path_str}")
+    return True
+
 
 def extract_fml_archive(archive_file_path, target_dir_path, additional_files=None):
     """Extract files from an FML archive."""
@@ -473,18 +516,7 @@ def extract_fml_archive(archive_file_path, target_dir_path, additional_files=Non
 
     os.makedirs(target_dir_path, exist_ok=True)
 
-    try:
-        if archive_file_path == '-':
-            f_in = sys.stdin
-        else:
-            f_in = open(archive_file_path, "r", encoding="utf-8")
-    except FileNotFoundError:
-        print(f"Error: Archive file not found: {archive_file_path}", file=sys.stderr)
-        sys.exit(1)
-    except Exception as e:
-        print(f"Error opening archive file {archive_file_path}: {e}", file=sys.stderr)
-        sys.exit(1)
-
+    f_in = _open_archive(archive_file_path)
 
     current_file_handle = None
     current_file_path_str = None
@@ -492,17 +524,16 @@ def extract_fml_archive(archive_file_path, target_dir_path, additional_files=Non
 
     with f_in:
         for line_num, line_raw in enumerate(f_in, 1):
-            line = line_raw.rstrip('\n\r') 
+            line = line_raw.rstrip('\n\r')
 
-            if line.startswith("<|||file_start="): 
+            if line.startswith("<|||file_start="):
                 if current_file_handle:
-                    current_file_handle.write("".join(file_content_buffer))
+                    _write_and_close_file(current_file_handle, file_content_buffer, current_file_path_str)
                     file_content_buffer = []
-                    current_file_handle.close()
-                    print(f"Extracted: {current_file_path_str}")
-                
-                current_file_path_str = line[FSL:-FEL]
-                
+                    current_file_handle = None
+
+                current_file_path_str = line[_FILE_START_PREFIX_LEN:-_TAG_SUFFIX_LEN]
+
                 # Security Check: Path Traversal
                 if not is_safe_path(target_dir_path, current_file_path_str):
                     print(f"Warning: Skipping unsafe path at line {line_num}: {current_file_path_str}", file=sys.stderr)
@@ -525,10 +556,8 @@ def extract_fml_archive(archive_file_path, target_dir_path, additional_files=Non
                     if line != "<|||file_end|||>":
                         prefix = line[:-len("<|||file_end|||>")]
                         file_content_buffer.append(prefix + "\n")
-                    current_file_handle.write("".join(file_content_buffer))
+                    _write_and_close_file(current_file_handle, file_content_buffer, current_file_path_str)
                     file_content_buffer = []
-                    current_file_handle.close()
-                    print(f"Extracted: {current_file_path_str}")
                     current_file_handle = None
                     current_file_path_str = None
                 else:
@@ -540,8 +569,8 @@ def extract_fml_archive(archive_file_path, target_dir_path, additional_files=Non
                 if current_file_handle:
                     file_content_buffer.append(line_raw)
                 else:
-                    dir_path_str = line[DIRSL:-DIREL]
-                    
+                    dir_path_str = line[_DIR_PREFIX_LEN:-_TAG_SUFFIX_LEN]
+
                     # Security Check: Path Traversal
                     if not is_safe_path(target_dir_path, dir_path_str):
                         print(f"Warning: Skipping unsafe directory path: {dir_path_str}", file=sys.stderr)
@@ -556,35 +585,48 @@ def extract_fml_archive(archive_file_path, target_dir_path, additional_files=Non
 
 
             elif current_file_handle:
-                file_content_buffer.append(line_raw) 
+                file_content_buffer.append(line_raw)
 
         if current_file_handle:
-            current_file_handle.write("".join(file_content_buffer))
-            current_file_handle.close()
-            print(f"Extracted (EOF): {current_file_path_str}")
+            _write_and_close_file(current_file_handle, file_content_buffer, current_file_path_str, eof=True)
 
 
 def list_fml_archive(archive_file_path):
     """List the contents of an FML archive."""
-    try:
-        if archive_file_path == '-':
-            f_in = sys.stdin
-        else:
-            f_in = open(archive_file_path, "r", encoding="utf-8")
-    except FileNotFoundError:
-        print(f"Error: Archive file not found: {archive_file_path}", file=sys.stderr)
-        sys.exit(1)
-    except Exception as e:
-        print(f"Error opening archive file {archive_file_path}: {e}", file=sys.stderr)
-        sys.exit(1)
+    f_in = _open_archive(archive_file_path)
 
     with f_in:
         for line_raw in f_in:
-            line = line_raw.rstrip('\n\r') 
-            if line.startswith("<|||file_start="): 
-                print(line[FSL:-FEL])
-            elif line.startswith("<|||dir="): 
-                print(line[DIRSL:-DIREL])
+            line = line_raw.rstrip('\n\r')
+            if line.startswith("<|||file_start="):
+                print(line[_FILE_START_PREFIX_LEN:-_TAG_SUFFIX_LEN])
+            elif line.startswith("<|||dir="):
+                print(line[_DIR_PREFIX_LEN:-_TAG_SUFFIX_LEN])
+
+
+def _resolve_mode(args):
+    """Resolve operation mode from CLI args. Returns 'create', 'extract', or 'list'."""
+    num_modes = sum([args.create, args.extract, args.list])
+    if num_modes > 1:
+        print("Error: Only one of --create, --extract, or --list can be specified.", file=sys.stderr)
+        sys.exit(1)
+    if args.extract:
+        return 'extract'
+    if args.list:
+        return 'list'
+    if args.create or args.input or (args.file == '-' and not sys.stdin.isatty()):
+        return 'create'
+    if not args.file and sys.stdin.isatty():
+        print("Error: No operation specified (create, extract, list) and no input provided.", file=sys.stderr)
+        print("Try 'fmlpack --help' for more information.", file=sys.stderr)
+        sys.exit(1)
+    if args.file and not args.input:
+        print(f"Error: Archive file '{args.file}' specified, but no operation (--create, --extract, --list).", file=sys.stderr)
+        sys.exit(1)
+    print("Error: No operation could be determined. Specify -c, -x, or -t, or provide input for creation.", file=sys.stderr)
+    print("Try 'fmlpack --help' for more information.", file=sys.stderr)
+    sys.exit(1)
+
 
 def main():
     """Main function."""
@@ -594,38 +636,16 @@ def main():
         print(get_fml_spec())
         return
 
-    num_modes = sum([args.create, args.extract, args.list])
-
-    if num_modes > 1:
-        print("Error: Only one of --create, --extract, or --list can be specified.", file=sys.stderr)
-        sys.exit(1)
-
-    is_create_mode = args.create
-    if num_modes == 0:
-        if args.input or (args.file == '-' and not sys.stdin.isatty()):
-            is_create_mode = True
-        elif not args.file and sys.stdin.isatty() and not args.input:
-            print("Error: No operation specified (create, extract, list) and no input provided.", file=sys.stderr)
-            print("Try 'fmlpack --help' for more information.", file=sys.stderr)
-            sys.exit(1)
-        elif args.file and not args.input:
-            print(f"Error: Archive file '{args.file}' specified, but no operation (--create, --extract, --list).", file=sys.stderr)
-            sys.exit(1)
-
+    mode = _resolve_mode(args)
 
     archive_file_path = args.file if args.file else None
-    if not archive_file_path and (args.extract or args.list) and sys.stdin.isatty():
-        print("Error: -f/--file or piped input is required for --extract or --list.", file=sys.stderr)
-        sys.exit(1)
-    if not archive_file_path and (args.extract or args.list) and not sys.stdin.isatty():
+    if mode in ('extract', 'list') and not archive_file_path:
+        if sys.stdin.isatty():
+            print("Error: -f/--file or piped input is required for --extract or --list.", file=sys.stderr)
+            sys.exit(1)
         archive_file_path = '-'
 
-    if not is_create_mode and not args.extract and not args.list:
-        print("Error: No operation could be determined. Specify -c, -x, or -t, or provide input for creation.", file=sys.stderr)
-        print("Try 'fmlpack --help' for more information.", file=sys.stderr)
-        sys.exit(1)
-
-    if is_create_mode:
+    if mode == 'create':
         if not args.input:
             print("Error: At least one input file or folder is required for archive creation.", file=sys.stderr)
             sys.exit(1)
@@ -646,7 +666,7 @@ def main():
 
         # Collect files, passing the matcher to prune during traversal
         all_files_and_folders_to_archive = expand_and_collect_paths(args.input, base_dir_for_creation, ignore_matcher)
-        
+
         # Calculate the root for relative paths in the FML archive
         if args.directory:
              root_dir_for_fml = base_dir_for_creation
@@ -654,35 +674,38 @@ def main():
              # Pass base_dir_for_creation to handle '.' correctly
              root_dir_for_fml = get_common_base_dir(all_files_and_folders_to_archive, base_dir_for_creation)
 
-        fml_content_lines, errors = generate_fml(root_dir_for_fml, all_files_and_folders_to_archive, args.exclude, args.include_spec, ignore_matcher=ignore_matcher)
+        fml_content_lines, skipped, errors = generate_fml(root_dir_for_fml, all_files_and_folders_to_archive, args.exclude, args.include_spec, ignore_matcher=ignore_matcher)
 
         if output_file_path == '-':
             try:
-                # FIX: Use buffer write to support UTF-8 on Windows consoles without crash
+                # Use buffer write to support UTF-8 on Windows consoles without crash
                 sys.stdout.buffer.write("".join(fml_content_lines).encode("utf-8"))
                 sys.stdout.buffer.flush()
             except BrokenPipeError:
                 try:
-                    sys.stderr.close() 
-                except Exception: 
-                    pass 
-                sys.exit(0) 
+                    sys.stderr.close()
+                except Exception:
+                    pass
+                sys.exit(0)
         else:
             with open(output_file_path, "w", encoding="utf-8") as f_out:
                 f_out.write("".join(fml_content_lines))
             print(f"FML archive created: {output_file_path}")
 
+        if skipped:
+            print("\nSkipped during archive creation:", file=sys.stderr)
+            for msg in skipped:
+                print(f"- {msg}", file=sys.stderr)
         if errors:
-            print("\nEncountered issues during archive creation:", file=sys.stderr)
+            print("\nErrors during archive creation:", file=sys.stderr)
             for error in errors:
                 print(f"- {error}", file=sys.stderr)
 
-
-    elif args.extract:
+    elif mode == 'extract':
         target_dir = args.directory if args.directory else "."
         extract_fml_archive(archive_file_path, target_dir, args.input if args.input else None)
 
-    elif args.list:
+    elif mode == 'list':
         if args.input:
              print("Warning: Input paths provided with --list will be ignored.", file=sys.stderr)
         list_fml_archive(archive_file_path)

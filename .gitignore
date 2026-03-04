@@ -1,4 +1,7 @@
 *.fml
+*.swp
+*.log
+.coverage
 .venv/
 build/
 venv/

@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fmlpack"
+version = "0.3.0"
+description = "fmlpack: A tool to convert file trees to/from TEXT, ideal for working with LLM and a lot of files (using Filesystem Markup Language -FML-)."
+authors = [
+    {name = "fedenunez", email = "fedenunez+fmlpack@gmail.com"}
+]
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.6"
+dependencies = ["pathspec>=0.10.3"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: System :: Archiving :: Packaging",
+    "Topic :: Text Processing :: Markup",
+    "Environment :: Console",
+]
+
+[project.urls]
+Homepage = "https://github.com/fedenunez/fmlpack"
+
+[project.scripts]
+fmlpack = "fmlpack:main"
+
+[tool.setuptools]
+py-modules = ["fmlpack"]
+
+[tool.setuptools.package-dir]
+"" = "src"
