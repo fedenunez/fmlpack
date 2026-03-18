@@ -11,9 +11,10 @@ import pathlib
 import sys
 import glob
 import pathspec
+import tiktoken
 from collections import deque
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 # Named constants (CCR-20260304-011)
 _MAX_UPWARD_SEARCH = 50          # max directory levels to search for project root
@@ -121,6 +122,22 @@ def process_arguments():
         "--gitignore",
         action="store_true",
         help="Also use .gitignore (searched upwards from base directory) as ignore patterns when creating an archive",
+    )
+    parser.add_argument(
+        "--tokens",
+        action="store_true",
+        help="Count tokens in the created archive and print total to stderr",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show per-file token counts and FML overhead without outputting the archive",
+    )
+    parser.add_argument(
+        "--token-encoding",
+        metavar="ENCODING",
+        default="cl100k_base",
+        help="Tokenizer encoding for --tokens/--dry-run (default: cl100k_base)",
     )
     parser.add_argument("input", nargs="*", help="Input files or folders for archive creation")
 
@@ -628,6 +645,60 @@ def _resolve_mode(args):
     sys.exit(1)
 
 
+def _print_dry_run_report(fml_content_lines, enc):
+    """Print per-file token counts and FML overhead to stderr."""
+    file_tokens = []  # list of (filename, token_count)
+    overhead_parts = []  # FML tag lines not belonging to file content
+    current_file = None
+    current_content = []
+
+    for line in fml_content_lines:
+        if line.startswith("<|||file_start="):
+            if current_file is not None:
+                # Flush previous file
+                content = "".join(current_content)
+                file_tokens.append((current_file, len(enc.encode(content))))
+                current_content = []
+            current_file = line[_FILE_START_PREFIX_LEN:].rstrip("\n")
+            if current_file.endswith("|||>"):
+                current_file = current_file[:-_TAG_SUFFIX_LEN]
+            overhead_parts.append(line)
+        elif line.rstrip("\n") == "<|||file_end|||>" or line.rstrip("\n").endswith("<|||file_end|||>"):
+            if current_file is not None:
+                content = "".join(current_content)
+                file_tokens.append((current_file, len(enc.encode(content))))
+                current_content = []
+                current_file = None
+            overhead_parts.append(line)
+        elif line.startswith("<|||dir="):
+            overhead_parts.append(line)
+        elif current_file is not None:
+            current_content.append(line)
+        else:
+            overhead_parts.append(line)
+
+    # Handle unclosed file at EOF
+    if current_file is not None:
+        content = "".join(current_content)
+        file_tokens.append((current_file, len(enc.encode(content))))
+
+    overhead_text = "".join(overhead_parts)
+    overhead_tokens = len(enc.encode(overhead_text))
+    total_tokens = sum(t for _, t in file_tokens) + overhead_tokens
+
+    # Determine column width for alignment
+    max_name_len = max((len(f) for f, _ in file_tokens), default=0)
+    max_name_len = max(max_name_len, len("[FML overhead]"))
+    col_width = max_name_len + 4
+
+    for fname, count in file_tokens:
+        print(f"{fname:<{col_width}}{count:>8,}", file=sys.stderr)
+
+    print(f"{'[FML overhead]':<{col_width}}{overhead_tokens:>8,}", file=sys.stderr)
+    print("─" * (col_width + 8), file=sys.stderr)
+    print(f"Total: {total_tokens:,} tokens ({len(file_tokens)} files)", file=sys.stderr)
+
+
 def main():
     """Main function."""
     args = process_arguments()
@@ -637,6 +708,20 @@ def main():
         return
 
     mode = _resolve_mode(args)
+
+    # Validate token flags are only used with create mode
+    if (args.tokens or args.dry_run) and mode != 'create':
+        print("Error: --tokens and --dry-run are only valid with --create mode.", file=sys.stderr)
+        sys.exit(1)
+
+    # Validate and load tokenizer encoding
+    enc = None
+    if args.tokens or args.dry_run:
+        try:
+            enc = tiktoken.get_encoding(args.token_encoding)
+        except Exception:
+            print(f"Error: Unknown token encoding: {args.token_encoding}", file=sys.stderr)
+            sys.exit(1)
 
     archive_file_path = args.file if args.file else None
     if mode in ('extract', 'list') and not archive_file_path:
@@ -676,21 +761,29 @@ def main():
 
         fml_content_lines, skipped, errors = generate_fml(root_dir_for_fml, all_files_and_folders_to_archive, args.exclude, args.include_spec, ignore_matcher=ignore_matcher)
 
-        if output_file_path == '-':
-            try:
-                # Use buffer write to support UTF-8 on Windows consoles without crash
-                sys.stdout.buffer.write("".join(fml_content_lines).encode("utf-8"))
-                sys.stdout.buffer.flush()
-            except BrokenPipeError:
-                try:
-                    sys.stderr.close()
-                except Exception:
-                    pass
-                sys.exit(0)
+        if args.dry_run:
+            _print_dry_run_report(fml_content_lines, enc)
         else:
-            with open(output_file_path, "w", encoding="utf-8") as f_out:
-                f_out.write("".join(fml_content_lines))
-            print(f"FML archive created: {output_file_path}")
+            if output_file_path == '-':
+                try:
+                    # Use buffer write to support UTF-8 on Windows consoles without crash
+                    sys.stdout.buffer.write("".join(fml_content_lines).encode("utf-8"))
+                    sys.stdout.buffer.flush()
+                except BrokenPipeError:
+                    try:
+                        sys.stderr.close()
+                    except Exception:
+                        pass
+                    sys.exit(0)
+            else:
+                with open(output_file_path, "w", encoding="utf-8") as f_out:
+                    f_out.write("".join(fml_content_lines))
+                print(f"FML archive created: {output_file_path}")
+
+            if args.tokens:
+                full_content = "".join(fml_content_lines)
+                total = len(enc.encode(full_content))
+                print(f"Total: {total:,} tokens", file=sys.stderr)
 
         if skipped:
             print("\nSkipped during archive creation:", file=sys.stderr)

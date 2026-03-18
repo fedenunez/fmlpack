@@ -1153,6 +1153,112 @@ class TestCliCommands:
         p = f"a{os.sep}b{os.sep}c"
         assert is_excluded_cli(p, ["a/b/c"]) is True
 
+class TestTokenCounting(TestCliCommands):
+    """Tests for --tokens, --dry-run, and --token-encoding flags."""
+
+    def test_tokens_flag_prints_total_to_stderr(self, temp_test_dir: pathlib.Path):
+        """--tokens should output the archive normally and print token count to stderr."""
+        result = self.run_fmlpack(["-c", "file_root.txt", "--tokens"], cwd=temp_test_dir)
+        # Archive should still be in stdout
+        assert "<|||file_start=file_root.txt|||>" in result.stdout
+        # Token count should be on stderr
+        assert "Total:" in result.stderr
+        assert "tokens" in result.stderr
+
+    def test_tokens_flag_count_is_positive_integer(self, temp_test_dir: pathlib.Path):
+        """Token count should be a positive integer."""
+        import re
+        result = self.run_fmlpack(["-c", "file_root.txt", "--tokens"], cwd=temp_test_dir)
+        match = re.search(r"Total:\s+([\d,]+)\s+tokens", result.stderr)
+        assert match, f"Expected 'Total: N tokens' in stderr, got: {result.stderr}"
+        count = int(match.group(1).replace(",", ""))
+        assert count > 0
+
+    def test_dry_run_no_stdout(self, temp_test_dir: pathlib.Path):
+        """--dry-run should NOT output the archive to stdout."""
+        result = self.run_fmlpack(["-c", "file_root.txt", "--dry-run"], cwd=temp_test_dir)
+        assert result.stdout == ""
+
+    def test_dry_run_shows_file_list_and_tokens(self, temp_test_dir: pathlib.Path):
+        """--dry-run should list files with token counts on stderr."""
+        result = self.run_fmlpack(["-c", "file_root.txt", "--dry-run"], cwd=temp_test_dir)
+        assert "file_root.txt" in result.stderr
+        assert "Total:" in result.stderr
+        assert "tokens" in result.stderr
+
+    def test_dry_run_shows_fml_overhead(self, temp_test_dir: pathlib.Path):
+        """--dry-run should show FML overhead tokens."""
+        result = self.run_fmlpack(["-c", "file_root.txt", "--dry-run"], cwd=temp_test_dir)
+        assert "FML overhead" in result.stderr
+
+    def test_dry_run_multiple_files(self, temp_test_dir: pathlib.Path):
+        """--dry-run with multiple files should list each file."""
+        result = self.run_fmlpack(["-c", "dir1"], cwd=temp_test_dir)
+        # First verify create works, then dry-run
+        result = self.run_fmlpack(["-c", "dir1", "--dry-run"], cwd=temp_test_dir)
+        assert "file1a.txt" in result.stderr
+        assert "file1b.txt" in result.stderr
+        assert "Total:" in result.stderr
+
+    def test_dry_run_shows_file_count(self, temp_test_dir: pathlib.Path):
+        """--dry-run total line should include file count."""
+        import re
+        result = self.run_fmlpack(["-c", "dir1", "--dry-run"], cwd=temp_test_dir)
+        match = re.search(r"\((\d+) files?\)", result.stderr)
+        assert match, f"Expected '(N files)' in stderr, got: {result.stderr}"
+        assert int(match.group(1)) >= 2
+
+    def test_token_encoding_flag(self, temp_test_dir: pathlib.Path):
+        """--token-encoding should accept a custom encoding name."""
+        result = self.run_fmlpack(
+            ["-c", "file_root.txt", "--tokens", "--token-encoding", "cl100k_base"],
+            cwd=temp_test_dir
+        )
+        assert "Total:" in result.stderr
+
+    def test_token_encoding_invalid(self, temp_test_dir: pathlib.Path):
+        """Invalid encoding should produce an error."""
+        result = self.run_fmlpack(
+            ["-c", "file_root.txt", "--tokens", "--token-encoding", "nonexistent_encoding"],
+            cwd=temp_test_dir,
+            expect_success=False
+        )
+        assert result.returncode != 0
+
+    def test_tokens_only_valid_with_create(self, temp_test_dir: pathlib.Path):
+        """--tokens should error when used with extract mode."""
+        archive = temp_test_dir / "a.fml"
+        archive.write_text("<|||file_start=x.txt|||>\nhi\n<|||file_end|||>\n")
+        result = self.run_fmlpack(
+            ["-x", "-f", str(archive), "--tokens"],
+            cwd=temp_test_dir,
+            expect_success=False
+        )
+        assert result.returncode != 0
+
+    def test_dry_run_only_valid_with_create(self, temp_test_dir: pathlib.Path):
+        """--dry-run should error when used with extract mode."""
+        archive = temp_test_dir / "a.fml"
+        archive.write_text("<|||file_start=x.txt|||>\nhi\n<|||file_end|||>\n")
+        result = self.run_fmlpack(
+            ["-x", "-f", str(archive), "--dry-run"],
+            cwd=temp_test_dir,
+            expect_success=False
+        )
+        assert result.returncode != 0
+
+    def test_tokens_consistent_with_dry_run(self, temp_test_dir: pathlib.Path):
+        """--tokens and --dry-run should report the same total."""
+        import re
+        result_tokens = self.run_fmlpack(["-c", "file_root.txt", "--tokens"], cwd=temp_test_dir)
+        result_dry = self.run_fmlpack(["-c", "file_root.txt", "--dry-run"], cwd=temp_test_dir)
+
+        match_t = re.search(r"Total:\s+([\d,]+)\s+tokens", result_tokens.stderr)
+        match_d = re.search(r"Total:\s+([\d,]+)\s+tokens", result_dry.stderr)
+        assert match_t and match_d
+        assert match_t.group(1) == match_d.group(1)
+
+
 if __name__ == "__main__":
     os.environ["PYTHONPATH"] = str(_project_root_dir / "src") + os.pathsep + os.environ.get("PYTHONPATH", "")
     sys.exit(pytest.main([__file__] + sys.argv[1:]))
